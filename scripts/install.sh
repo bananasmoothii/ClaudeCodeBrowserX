@@ -121,6 +121,16 @@ echo -e "${GREEN}✓ MCP server installed${NC}"
 # Copy agent
 cp "$SCRIPT_DIR/agent/browser_agent.py" "$INSTALL_DIR/agent/"
 chmod +x "$INSTALL_DIR/agent/browser_agent.py"
+
+# The usage skill for Claude Code agents (how to drive these tools, start
+# Firefox with the BiDi port, restart the server safely). User-level, so it is
+# there in every project.
+if [ -f "$SCRIPT_DIR/skills/claudecodebrowserx/SKILL.md" ]; then
+    SKILL_DIR="$HOME/.claude/skills/claudecodebrowserx"
+    mkdir -p "$SKILL_DIR"
+    cp "$SCRIPT_DIR/skills/claudecodebrowserx/SKILL.md" "$SKILL_DIR/"
+    echo "[ok] Claude Code skill installed: $SKILL_DIR"
+fi
 echo -e "${GREEN}✓ Browser agent installed${NC}"
 
 # Install native messaging manifest for Firefox

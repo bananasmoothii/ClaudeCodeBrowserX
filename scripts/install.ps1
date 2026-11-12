@@ -79,6 +79,17 @@ Copy-Item (Join-Path $RepoRoot "extension\credentials.js") (Join-Path $InstallDi
 Copy-Item (Join-Path $RepoRoot "agent\browser_agent.py") (Join-Path $InstallDir "agent\")
 Write-Host "[ok] Components installed"
 
+# The usage skill for Claude Code agents (how to drive these tools, start
+# Firefox with the BiDi port, restart the server safely). User-level, so it is
+# there in every project.
+$SkillSrc = Join-Path $RepoRoot "skills\claudecodebrowserx"
+if (Test-Path $SkillSrc) {
+    $SkillDst = Join-Path $env:USERPROFILE ".claude\skills\claudecodebrowserx"
+    New-Item -ItemType Directory -Force -Path $SkillDst | Out-Null
+    Copy-Item (Join-Path $SkillSrc "SKILL.md") $SkillDst -Force
+    Write-Host "[ok] Claude Code skill installed: $SkillDst"
+}
+
 # --- Native messaging host wrapper --------------------------------------
 
 # Firefox on Windows can only launch .exe/.bat native hosts, not .py files,
