@@ -146,13 +146,19 @@ def call_tool(name, arguments):
         log(f"Error calling tool {name}: {e}")
         return {'success': False, 'error': str(e)}
 
-def read_message():
-    """Read a JSON-RPC message from stdin."""
+def read_message(stream=None):
+    """Read a JSON-RPC message from stdin.
+
+    MCP messages are UTF-8. sys.stdin is a text stream in the locale's
+    encoding, which on Windows is cp1252, so "é" arrived as "Ã©" and every
+    non-ASCII character the model typed into a page was corrupted. Read bytes
+    and decode them ourselves."""
     try:
-        line = sys.stdin.readline()
-        if not line:
+        stream = sys.stdin.buffer if stream is None else stream
+        raw = stream.readline()
+        if not raw:
             return None
-        return json.loads(line.strip())
+        return json.loads(raw.decode('utf-8').strip())
     except json.JSONDecodeError as e:
         log(f"JSON decode error: {e}")
         return None

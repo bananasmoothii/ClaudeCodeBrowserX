@@ -116,6 +116,7 @@ from safety import (get_safety_guard, prune_screenshots,
                     screenshot_filename,
                     redact_arguments, resolve_screenshots_dir)
 import ax  # accessibility snapshot and ref-based actions
+import bidi  # trusted input and screenshots over WebDriver BiDi
 
 # API token for localhost HTTP authentication
 _TOKEN_FILE = Path.home() / '.claudecodebrowserx' / 'api_token'
@@ -354,7 +355,7 @@ MCP_TOOLS: List[MCPTool] = [
             "type": "object",
             "properties": {
                 "tab_id": {"type": "integer", "description": "Optional tab ID. If not specified, uses active tab."},
-                "full_page": {"type": "boolean", "description": "Capture the full page instead of the visible area. NOT SUPPORTED in attended Firefox - the result falls back to the visible viewport with fullPageCaptured: false. Use browser_scroll_and_capture, or the headless backend, for a whole page.", "default": False},
+                "full_page": {"type": "boolean", "description": "Capture the full page instead of the visible area. Supported when Firefox was started with --remote-debugging-port (see browser_safety_status: bidi.connected); otherwise attended Firefox falls back to the visible viewport with fullPageCaptured: false, and browser_scroll_and_capture or the headless backend capture a whole page.", "default": False},
                 "save_to_file": {"type": "boolean", "description": "Save screenshot to file.", "default": True},
                 "filename": {"type": "string", "description": "Optional filename for saved screenshot."}
             }
@@ -379,7 +380,7 @@ MCP_TOOLS: List[MCPTool] = [
     ),
     MCPTool(
         name="browser_type",
-        description="Type text into an input field or editable element. Can target by selector, placeholder, name, or focus current element. Refused on a credential field (password, one-time code, card field, or a field whose name or id looks like a credential) unless allow_password_typing is set in ~/.claudecodebrowserx/safety.json; an allow_password argument is ignored.",
+        description="Type text into an input field or editable element. Can target by selector, placeholder, name, or focus current element (typing at the caret, and replacing a selection). With Firefox's debugging port open (browser_safety_status: bidi.connected) the keystrokes are real ones, so it works in editors that ignore synthetic events, such as Google Docs (click the page first, then type with no selector), and any Unicode text arrives intact. Refused on a credential field (password, one-time code, card field, or a field whose name or id looks like a credential) unless allow_password_typing is set in ~/.claudecodebrowserx/safety.json; an allow_password argument is ignored.",
         input_schema={
             "type": "object",
             "required": ["text"],
@@ -1421,6 +1422,14 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
                                    f'{type(e).__name__}: {e}'}
             self.send_json_response(result)
 
+        elif parsed.path == '/admin/shutdown':
+            # A clean stop. A process killed outright cannot end Firefox's one
+            # WebDriver BiDi session, and then real input stays locked out
+            # until Firefox is restarted, so replacing the server (to pick up
+            # new code) goes through here. Authenticated like every POST.
+            self.send_json_response({'success': True, 'message': 'shutting down'})
+            threading.Thread(target=_shutdown_cleanly, daemon=True).start()
+
         elif parsed.path == '/browser/command':
             # This reported {"success": true, "message": "Command queued"}
             # while queueing nothing at all - the one caller
@@ -1532,6 +1541,12 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
             status['mode'] = 'headless' if HEADLESS_MODE else 'attended'
             status['headless_only_tools'] = sorted(HEADLESS_ONLY_TOOLS)
             status['browsers_connected'] = len(connection_manager.browser_connections)
+            # Whether typing, keys, clicks and screenshots can use real
+            # input; asked here so "call this first" tells the whole story.
+            if not HEADLESS_MODE:
+                backend = bidi.get_bidi_backend()
+                backend.available()
+                status['bidi'] = backend.status()
             return status
         if tool_name == 'browser_run_workflow':
             return self._run_workflow(arguments)
@@ -1618,13 +1633,112 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
             arguments['allow_password'] = bool(
                 get_safety_guard().config.get('allow_password_typing', False))
 
-        return self._dispatch_action(action, tab_id, arguments)
+        if tool_name == 'browser_navigate' and parse_flag(
+                arguments.get('new_tab'), False):
+            return self._navigate_in_new_tab(arguments)
+
+        return self._flag_synthetic_input(
+            action, arguments, self._dispatch_action(action, tab_id, arguments))
+
+    def _flag_synthetic_input(self, action: str, arguments: Dict[str, Any],
+                              result: Any) -> Any:
+        """Say so when typing, a key press or a click went out as synthetic
+        events although real ones were on offer.
+
+        Some pages ignore synthetic events, so the extension's "success" is
+        not proof the page took the input. Only a call bidi.py would have
+        taken is marked: a double-click or an XPath click was never its job.
+        """
+        if (HEADLESS_MODE or action not in ('type', 'pressKey', 'click')
+                or not isinstance(result, dict)
+                or result.get('via') == 'webdriver-bidi'):
+            return result
+        backend = bidi.get_bidi_backend()
+        if backend.enabled and backend.wants(action, arguments):
+            result['input'] = 'synthetic'
+            result['input_note'] = backend.fallback_note()
+        return result
+
+    def _navigate_in_new_tab(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """browser_navigate with new_tab: true.
+
+        The schema offered new_tab and nothing implemented it, so the call
+        quietly navigated the tab the person was looking at. A blank tab is
+        opened and then navigated the ordinary way, so the guard sees the
+        navigation and the result reports where the tab landed.
+        """
+        created = self._dispatch_action(
+            'createTab', None, {'url': 'about:blank', 'active': True})
+        created = created if isinstance(created, dict) else {}
+        # The extension answers {tab: {id}}, the headless backend {tabId}.
+        new_id = (created.get('tab') or {}).get('id', created.get('tabId'))
+        if not created.get('success') or new_id is None:
+            return {'success': False,
+                    'error': 'Could not open a new tab, so nothing was '
+                             'navigated: ' + str(created.get('error', 'no '
+                                                             'answer from the browser'))}
+        arguments = {k: v for k, v in arguments.items() if k != 'new_tab'}
+        result = self._dispatch_action('navigate', new_id, arguments)
+        if isinstance(result, dict):
+            result['tab_id'] = new_id
+            result['new_tab'] = True
+        return result
+
+    def _bidi_tab(self, tab_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        """The extension's description of the tab an action is for: id, url,
+        title, whether it is active, and whether its window is private.
+        BiDi numbers tabs its own way, so bidi.py finds the matching one by
+        these. None when the extension cannot say."""
+        try:
+            if tab_id is not None:
+                info = self._dispatch_action('getTabInfo', tab_id, {})
+                return info.get('tab') if info.get('success') else None
+            listing = self._dispatch_action(
+                'getTabs', None, {'current_window_only': True, 'limit': 50})
+            for tab in listing.get('tabs') or []:
+                if tab.get('active'):
+                    return tab
+        except Exception as e:
+            logger.info(f'Could not look up the tab for BiDi: {e}')
+        return None
+
+    def _try_bidi(self, action: str, tab_id: Optional[int],
+                  arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        backend = bidi.get_bidi_backend()
+        # Connectivity first: with no BiDi port this must cost nothing, and
+        # the tab lookup below is a round trip to the extension.
+        if not backend.wants(action, arguments) or not backend.available():
+            return None
+        tab = self._bidi_tab(tab_id)
+        if action == 'screenshot' and (tab is None
+                                       or tab.get('incognito') is not False):
+            # Written to disk unless the tab is private, and only the
+            # extension is certain about that (an extension older than the
+            # incognito field does not say, which counts as not certain).
+            return None
+        try:
+            result = backend.execute(action, tab, dict(arguments))
+        except bidi.BiDiUnavailable as e:
+            logger.info(f'WebDriver BiDi not used for {action}: {e}')
+            return None
+        get_safety_guard().note_url(result)
+        if action == 'screenshot' and result.get('success') and result.get('data'):
+            return self._save_screenshot(result, arguments)
+        return result
 
     def _dispatch_action(self, action: str, tab_id: Optional[int],
                          arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Send a browser action over whichever transport is available
         (WebSocket, headless Playwright, or native-host HTTP polling)."""
         guard = get_safety_guard()
+
+        # Trusted input and screenshots go through Firefox's WebDriver BiDi
+        # when it is there; see bidi.py. None means "not available for this
+        # call", and the extension does it as it always has.
+        if not HEADLESS_MODE and action in bidi.BiDiBackend.ACTIONS:
+            routed = self._try_bidi(action, tab_id, arguments)
+            if routed is not None:
+                return routed
 
         # Prompts that wait on a human (approval, captcha solving) can take far
         # longer than a normal command, so give the transport matching headroom.
@@ -2280,6 +2394,60 @@ async def run_with_headless():
     await headless.stop()
 
 
+def _shutdown_cleanly(delay: float = 0.3) -> None:
+    """End the BiDi session, then stop the process.
+
+    The delay lets the HTTP answer to POST /admin/shutdown reach the caller
+    first. os._exit, because this runs on a worker thread and the main thread
+    is parked in an event loop that has nothing to unwind.
+    """
+    time.sleep(delay)
+    try:
+        bidi.get_bidi_backend().close()
+    except Exception:
+        pass
+    logger.info('Shutting down on request')
+    logging.shutdown()
+    os._exit(0)
+
+
+def _install_bidi_shutdown() -> None:
+    """End the WebDriver BiDi session when this process stops.
+
+    Firefox allows one BiDi session. A server stopped without ending it left
+    the session counted as open, and the next server could not get one
+    ("Maximum number of active sessions") until Firefox was restarted, so
+    typing into Google Docs quietly went back to synthetic events. SIGINT
+    keeps its default (KeyboardInterrupt unwinds to atexit); SIGTERM and
+    Windows' SIGBREAK are turned into a normal exit. A process killed outright
+    (Stop-Process -Force, taskkill /F, SIGKILL) cannot run any of this, so
+    stop the server with a plain taskkill or SIGTERM.
+    """
+    import atexit
+    import signal
+
+    def end_session(*_args) -> None:
+        try:
+            bidi.get_bidi_backend().close()
+        except Exception:
+            pass
+
+    atexit.register(end_session)
+
+    def on_signal(signum, _frame) -> None:
+        end_session()
+        sys.exit(0)
+
+    for name in ('SIGTERM', 'SIGBREAK'):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, on_signal)
+        except (ValueError, OSError):
+            pass  # not the main thread, or the platform refuses
+
+
 def main():
     """Main entry point."""
     mode_label = "HEADLESS (Playwright)" if HEADLESS_MODE else "EXTENSION (Firefox/native-host)"
@@ -2294,6 +2462,9 @@ def main():
 |  Logs:             {str(LOG_FILE):<40} |
 +--------------------------------------------------------------+
     """)
+
+    if not HEADLESS_MODE:
+        _install_bidi_shutdown()
 
     # Start HTTP server in a thread (always needed)
     http_thread = threading.Thread(target=run_http_server, daemon=True)

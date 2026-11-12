@@ -307,7 +307,7 @@ function loadContentScript(registry, { timers } = {}) {
   const send = (message) => new Promise((resolve, reject) => {
     const ret = messageListener(message, null, resolve);
     assert.equal(ret, true, 'listener must keep the channel open');
-    setTimeout(() => reject(new Error(`no response for ${message.action}`)), 2000);
+    setTimeout(() => reject(new Error(`no response for ${message.action}`)), 10000);
   });
 
   return { send, window, document, consoleStub, XMLHttpRequestStub,

@@ -2127,7 +2127,11 @@ async function getAllTabs(options = {}) {
           windowId: t.windowId,
           pinned: t.pinned,
           status: t.status,  // "loading" or "complete"
-          audible: t.audible  // playing audio
+          audible: t.audible,  // playing audio
+          // The server decides from this whether it may photograph the tab
+          // itself (bidi.py): a private window's screenshot is not written
+          // to disk, and only the extension can say which tabs are private.
+          incognito: t.incognito === true
         };
         if (includeFavicon) {
           base.favIconUrl = t.favIconUrl;
@@ -2183,6 +2187,7 @@ async function getTabInfo(tabId) {
         status: tab.status,
         discarded: tab.discarded,
         audible: tab.audible,
+        incognito: tab.incognito === true,
         favIconUrl: tab.favIconUrl
       },
       window: {

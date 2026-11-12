@@ -569,13 +569,34 @@ _TYPING_HARNESS = r"""
 const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const compiled = eval('(' + input.script + ')');
 
-function make(spec) {
+let ranges = [];
+// A document of its own for each frame: the selection the script makes has to
+// be made in the document that owns the element, or it is made nowhere.
+function makeDoc() {
+  const doc = {
+    activeElement: null,
+    createRange: () => ({
+      selectNodeContents(node) { this.node = node; },
+      collapse(toStart) { this.toStart = toStart; },
+    }),
+  };
+  doc.defaultView = {
+    getSelection: () => ({
+      removeAllRanges() { ranges = []; },
+      addRange(range) { ranges.push(range); },
+    }),
+  };
+  return doc;
+}
+
+function make(spec, doc) {
   if (!spec) return null;
   const el = {
     tagName: spec.tag,
     value: spec.value,
     textContent: spec.textContent,
     isContentEditable: spec.editable === true,
+    ownerDocument: doc,
     events: [],
     selection: null,
     dispatchEvent(event) { this.events.push(event.type); },
@@ -585,29 +606,39 @@ function make(spec) {
       this.selection = [start, end];
     },
   };
-  if (spec.shadowActive) el.shadowRoot = { activeElement: make(spec.shadowActive) };
+  if (spec.shadowActive) {
+    el.shadowRoot = { activeElement: make(spec.shadowActive, doc) };
+  }
+  if (spec.frameOpaque) {
+    // A frame from another site: reading its document throws.
+    Object.defineProperty(el, 'contentDocument', {
+      get() { throw new Error('SecurityError'); } });
+  } else if (spec.frameActive !== undefined) {
+    const inner = makeDoc();
+    inner.activeElement = make(spec.frameActive, inner);
+    el.contentDocument = inner;
+  }
   return el;
 }
 
-const active = make(input.active);
-let ranges = [];
+const topDoc = makeDoc();
+const active = make(input.active, topDoc);
+topDoc.activeElement = active;
 global.Event = class { constructor(type) { this.type = type; } };
-global.document = {
-  activeElement: active,
-  createRange: () => ({
-    selectNodeContents(node) { this.node = node; },
-    collapse(toStart) { this.toStart = toStart; },
-  }),
-};
-global.window = {
-  getSelection: () => ({
-    removeAllRanges() { ranges = []; },
-    addRange(range) { ranges.push(range); },
-  }),
-};
+global.document = topDoc;
+global.window = topDoc.defaultView;
 const result = compiled();
 let el = active;
-while (el && el.shadowRoot) el = el.shadowRoot.activeElement;
+for (;;) {
+  if (el && el.shadowRoot && el.shadowRoot.activeElement) {
+    el = el.shadowRoot.activeElement;
+  } else if (el && !(input.active && input.active.frameOpaque) &&
+             el.contentDocument && el.contentDocument.activeElement) {
+    el = el.contentDocument.activeElement;
+  } else {
+    break;
+  }
+}
 process.stdout.write(JSON.stringify({
   result,
   value: el ? el.value : null,
@@ -2640,6 +2671,27 @@ class RealTypingPreparationTests(unittest.TestCase):
                            clear=True)
         self.assertEqual(out['result'], {'editable': True, 'tag': 'input'})
         self.assertEqual(out['value'], '')
+
+    def test_a_same_origin_frame_is_followed_to_what_holds_focus(self):
+        """Google Docs takes its text from an editable body inside a frame:
+        stopping at the <iframe> reported that nothing there could receive
+        text."""
+        out = self.prepare({'tag': 'IFRAME',
+                            'frameActive': {'tag': 'BODY', 'editable': True,
+                                            'textContent': 'abc'}},
+                           clear=True)
+        self.assertEqual(out['result'], {'editable': True, 'tag': 'body'})
+        self.assertEqual(out['textContent'], '')
+        self.assertTrue(out['caretAtEnd'])
+
+    def test_a_frame_whose_focus_cannot_take_text_is_reported_as_it(self):
+        out = self.prepare({'tag': 'IFRAME',
+                            'frameActive': {'tag': 'DIV', 'textContent': 'x'}})
+        self.assertEqual(out['result'], {'editable': False, 'tag': 'div'})
+
+    def test_a_frame_from_another_site_is_not_typed_into(self):
+        out = self.prepare({'tag': 'IFRAME', 'frameOpaque': True})
+        self.assertEqual(out['result'], {'editable': False, 'tag': 'iframe'})
 
 
 @requires_node

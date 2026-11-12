@@ -401,7 +401,7 @@ class HeadlessBrowser:
         )
 
     @staticmethod
-    def _prepare_typing_js(clear: bool) -> str:
+    def _prepare_typing_js(clear: bool, keep_selection: bool = False) -> str:
         """JS run on the focused element just before type sends its keys.
 
         A port of the middle of performType in content.js. Only a text field
@@ -414,14 +414,37 @@ class HeadlessBrowser:
 
         An open shadow root is followed to the input it wraps, because that
         is where the keys go when <sl-input> or similar has focus.
+
+        keep_selection leaves the caret and any selection where they are.
+        A person typing into the focused element types at the caret, and a
+        driver that has just pressed Ctrl+A to replace the text needs that
+        selection to survive; only the real-keyboard backend (bidi.py) asks
+        for it, since the others have always appended.
         """
         clear_literal = 'true' if clear else 'false'
+        keep_literal = 'true' if keep_selection else 'false'
         return (
             "() => {\n"
             f"const CLEAR = {clear_literal};\n"
+            f"const KEEP_SELECTION = {keep_literal};\n"
             "let el = document.activeElement;\n"
-            "while (el && el.shadowRoot && el.shadowRoot.activeElement)\n"
-            "  el = el.shadowRoot.activeElement;\n"
+            # Into an open shadow root and into a same-origin frame, in any
+            # order, as _focused_credential_js does: the keys go to whatever
+            # holds focus at the bottom. Google Docs takes its text from an
+            # editable body inside a frame, so stopping at the <iframe> told
+            # the caller that nothing could receive text there.
+            "for (;;) {\n"
+            "  if (el && el.shadowRoot && el.shadowRoot.activeElement) {\n"
+            "    el = el.shadowRoot.activeElement;\n"
+            "  } else if (el && (el.tagName === 'IFRAME' || el.tagName === 'FRAME')) {\n"
+            "    let doc = null;\n"
+            "    try { doc = el.contentDocument; } catch (e) {}\n"
+            "    if (!doc || !doc.activeElement) break;\n"
+            "    el = doc.activeElement;\n"
+            "  } else {\n"
+            "    break;\n"
+            "  }\n"
+            "}\n"
             "if (!el) return {editable: false, tag: 'none'};\n"
             "const tag = (el.tagName || '').toLowerCase();\n"
             "const field = tag === 'input' || tag === 'textarea';\n"
@@ -431,14 +454,16 @@ class HeadlessBrowser:
             "  if (field) el.value = ''; else el.textContent = '';\n"
             "  el.dispatchEvent(new Event('input', {bubbles: true}));\n"
             "}\n"
+            "if (KEEP_SELECTION && !CLEAR) return {editable: true, tag};\n"
             "try {\n"
             "  if (field) {\n"
             "    el.setSelectionRange(el.value.length, el.value.length);\n"
             "  } else {\n"
-            "    const range = document.createRange();\n"
+            "    const doc = el.ownerDocument;\n"
+            "    const range = doc.createRange();\n"
             "    range.selectNodeContents(el);\n"
             "    range.collapse(false);\n"
-            "    const selection = window.getSelection();\n"
+            "    const selection = doc.defaultView.getSelection();\n"
             "    selection.removeAllRanges();\n"
             "    selection.addRange(range);\n"
             "  }\n"
@@ -719,7 +744,18 @@ class HeadlessBrowser:
 
     async def _dispatch(self, action: str, tab_id, args: Dict[str, Any]) -> Dict[str, Any]:
         page = await self._get_page(tab_id)
+        return await self._run(page, action, args, tab_id)
 
+    async def _run(self, page, action: str, args: Dict[str, Any],
+                   tab_id=None) -> Dict[str, Any]:
+        """One action against one page.
+
+        Split from _dispatch so bidi.py can run type, pressKey and click
+        against a page object of its own (a real Firefox over WebDriver BiDi)
+        and get every guard in here - the credential probes, the key
+        allowlist - instead of keeping a second copy of them. Anything
+        passed as `page` needs only the Playwright methods the action uses.
+        """
         if action == 'navigate':
             url = args.get('url', '')
             await page.goto(url, wait_until='domcontentloaded', timeout=30000)
@@ -812,7 +848,10 @@ class HeadlessBrowser:
             # only check - typing into the focused element used to bypass
             # the guard entirely, which attended mode never did.
             await self._assert_focused_not_password(page, args)
-            target = await page.evaluate(self._prepare_typing_js(clear))
+            keep = (not selector and not clear
+                    and getattr(page, 'keeps_selection', False))
+            target = await page.evaluate(
+                self._prepare_typing_js(clear, keep_selection=keep))
             if not (isinstance(target, dict) and target.get('editable')):
                 tag = target.get('tag') if isinstance(target, dict) else None
                 raise RuntimeError(

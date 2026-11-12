@@ -129,6 +129,7 @@ class AttributionTests(unittest.TestCase):
         'mcp-server/server.py',
         'mcp-server/safety.py',
         'mcp-server/ax.py',
+        'mcp-server/bidi.py',
         'mcp-server/headless_backend.py',
         'mcp-server/stdio_wrapper.py',
         'native-host/claudecodebrowserx_host.py',

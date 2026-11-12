@@ -2459,6 +2459,23 @@ test('get_tabs defaults to the current window, by which tabs come back', async (
     'opting in explicitly must widen the view');
 });
 
+test('get_tabs and get_tab_info say whether a tab is private', async () => {
+  // bidi.py photographs a tab itself only when the extension says it is not
+  // private, because a private window's screenshot must not be written to
+  // disk. An extension that stays silent must read as "not certain", so the
+  // field has to be a real boolean on every tab, not just present sometimes.
+  const ctx = loadBackground();
+
+  const listed = await ctx.command('getTabs', {}, undefined);
+  assert.ok(listed.tabs.length > 0);
+  for (const tab of listed.tabs) {
+    assert.strictEqual(tab.incognito, false);
+  }
+
+  const info = await ctx.command('getTabInfo', {}, 7);
+  assert.strictEqual(info.tab.incognito, false);
+});
+
 test('a log entry hands the caller only the fields it should', async () => {
   // Every other assertion here is a scalar, because deepEqual cannot compare
   // an object built inside the vm realm. Re-homing it through JSON makes a

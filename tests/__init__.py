@@ -45,5 +45,10 @@ os.environ['USERPROFILE'] = TEST_HOME
 for _name in [name for name in os.environ
               if name.startswith(('CLAUDE_BROWSERX_', 'CLAUDE_BROWSER' + '_'))]:
     os.environ.pop(_name, None)
+# The server tries Firefox's WebDriver BiDi port (9222) before the extension.
+# A developer with Firefox running on that port would have the suite type
+# into their browser, so the default backend is off; the BiDi tests build
+# their own, on a port of their own.
+os.environ['CLAUDE_BROWSERX_BIDI'] = '0'
 
 REPO_ROOT = Path(__file__).resolve().parent.parent

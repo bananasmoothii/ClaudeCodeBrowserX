@@ -51,6 +51,7 @@ class ScreenshotLocationTests(unittest.TestCase):
                             Path('/tmp/claudecodebrowserx/screenshots'))
         self.assertTrue(server.SCREENSHOTS_DIR.is_relative_to(Path.home()))
 
+    @unittest.skipIf(sys.platform == 'win32', 'POSIX permission bits do not exist on Windows')
     def test_directory_is_not_world_readable(self):
         self.assertTrue(server.SCREENSHOTS_DIR.is_dir())
         mode = server.SCREENSHOTS_DIR.stat().st_mode & 0o777
@@ -183,7 +184,7 @@ class CredentialGuardPlumbingTests(unittest.TestCase):
         not, and the test passed. Assert instead that no reader builds its own
         value expression -- behaviour is covered by the content-script suite,
         which drives the real code."""
-        content_js = (ROOT / 'extension' / 'content.js').read_text()
+        content_js = (ROOT / 'extension' / 'content.js').read_text(encoding='utf-8')
 
         self.assertIn('function safeElementValue(', content_js,
                       'there should be one place that decides what a value looks like')
@@ -1007,6 +1008,7 @@ class ScreenshotSaveFlagTests(unittest.TestCase):
             {'filename': self.name})
         self.assertTrue(self.path.exists())
 
+    @unittest.skipIf(sys.platform == 'win32', 'POSIX permission bits do not exist on Windows')
     def test_a_written_screenshot_is_private_to_the_user(self):
         """The directory is 0700, but the file asks for 0600 as well, so a
         copy or a looser directory does not expose what was on screen. Set a
@@ -1287,7 +1289,7 @@ class TabLimitTests(unittest.TestCase):
         """The schema and both tool descriptions said 200 while the extension
         returned at most 50, so an agent planned around a number it could
         never get."""
-        background = (REPO_ROOT / 'extension' / 'background.js').read_text()
+        background = (REPO_ROOT / 'extension' / 'background.js').read_text(encoding='utf-8')
         enforced = re.search(r'const MAX_TAB_RESULTS = (\d+);', background)
         self.assertIsNotNone(enforced, 'extension cap constant moved or renamed')
         self.assertEqual(server.MAX_TAB_LIMIT, int(enforced.group(1)))
@@ -1518,6 +1520,90 @@ class SafetyGuardTests(unittest.TestCase):
                 denial = guard.check('browser_navigate', {'url': url})
                 self.assertIsNotNone(denial)
                 self.assertEqual(denial['safety_decision'], 'blocked_scheme')
+
+
+class NavigateInNewTabTests(unittest.TestCase):
+    """browser_navigate advertised new_tab and nothing implemented it, so the
+    call navigated the tab the person was looking at."""
+
+    URL = 'https://example.com/page'
+
+    def run_navigate(self, arguments, created):
+        calls = []
+
+        def fake_dispatch(action, tab_id, args):
+            calls.append((action, tab_id, dict(args)))
+            if action == 'createTab':
+                return created
+            return {'success': True, 'url': args.get('url')}
+
+        handler = server.MCPHTTPHandler.__new__(server.MCPHTTPHandler)
+        handler._dispatch_action = fake_dispatch
+        return handler.execute_tool('browser_navigate', dict(arguments)), calls
+
+    def test_a_blank_tab_is_opened_and_then_navigated(self):
+        result, calls = self.run_navigate(
+            {'url': self.URL, 'new_tab': True},
+            {'success': True, 'tab': {'id': 7, 'url': 'about:blank'}})
+        self.assertEqual([c[0] for c in calls], ['createTab', 'navigate'])
+        self.assertEqual(calls[0][2]['url'], 'about:blank')
+        self.assertEqual(calls[1][1], 7, 'the new tab, not the current one')
+        self.assertNotIn('new_tab', calls[1][2])
+        self.assertEqual((result['tab_id'], result['new_tab']), (7, True))
+
+    def test_the_headless_backends_answer_shape_works_too(self):
+        result, calls = self.run_navigate(
+            {'url': self.URL, 'new_tab': True},
+            {'success': True, 'tabId': 3, 'url': 'about:blank'})
+        self.assertEqual(calls[1][1], 3)
+        self.assertEqual(result['tab_id'], 3)
+
+    def test_the_flag_sent_as_the_string_false_navigates_in_place(self):
+        result, calls = self.run_navigate(
+            {'url': self.URL, 'new_tab': 'false'}, {'success': True})
+        self.assertEqual([c[0] for c in calls], ['navigate'])
+        self.assertNotIn('new_tab', result)
+
+    def test_when_no_tab_can_be_opened_nothing_is_navigated(self):
+        result, calls = self.run_navigate(
+            {'url': self.URL, 'new_tab': True},
+            {'success': False, 'error': 'window closed'})
+        self.assertEqual([c[0] for c in calls], ['createTab'])
+        self.assertFalse(result['success'])
+        self.assertIn('window closed', result['error'])
+
+    def test_the_guard_still_judges_the_url(self):
+        result, calls = self.run_navigate(
+            {'url': 'file:///etc/passwd', 'new_tab': True},
+            {'success': True, 'tab': {'id': 7}})
+        self.assertFalse(result['success'])
+        self.assertEqual(calls, [], 'refused before any tab was opened')
+
+
+class CleanShutdownTests(unittest.TestCase):
+
+    def test_the_bidi_session_is_ended_before_the_process_exits(self):
+        order = []
+        backend = unittest.mock.Mock()
+        backend.close.side_effect = lambda: order.append('close')
+        with unittest.mock.patch.object(server.bidi, 'get_bidi_backend',
+                                        return_value=backend),                 unittest.mock.patch.object(server.os, '_exit',
+                                           side_effect=lambda code: order.append(('exit', code))),                 unittest.mock.patch.object(server.time, 'sleep'):
+            server._shutdown_cleanly(0)
+        self.assertEqual(order, ['close', ('exit', 0)])
+
+    def test_it_still_exits_when_ending_the_session_fails(self):
+        backend = unittest.mock.Mock()
+        backend.close.side_effect = RuntimeError('socket gone')
+        with unittest.mock.patch.object(server.bidi, 'get_bidi_backend',
+                                        return_value=backend),                 unittest.mock.patch.object(server.os, '_exit') as exit_,                 unittest.mock.patch.object(server.time, 'sleep'):
+            server._shutdown_cleanly(0)
+        exit_.assert_called_once_with(0)
+
+    def test_the_endpoint_is_behind_the_api_key(self):
+        source = inspect.getsource(server.MCPHTTPHandler.do_POST)
+        # do_POST refuses an unauthenticated caller before it reads the path.
+        self.assertLess(source.index('_check_auth'), source.index('/admin/shutdown'))
 
 
 if __name__ == '__main__':

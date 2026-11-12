@@ -13,6 +13,29 @@ ClaudeCodeBrowserX in 2.0.0.
 ## [Unreleased]
 
 ### Added
+- **Real keystrokes, clicks and background screenshots over WebDriver BiDi**
+  (`mcp-server/bidi.py`). The extension can only send synthetic DOM events,
+  which pages such as Google Docs ignore, so `browser_type` reported success
+  with nothing typed. When Firefox is started with its debugging port open
+  (`scripts/start-firefox.sh` or `.ps1`), the server now takes `browser_type`,
+  `browser_press_key`, plain `browser_click` and `browser_screenshot` itself:
+  real `isTrusted` events, Unicode text intact, typing at the caret (so Ctrl+A
+  then typing replaces), `full_page` screenshots, and screenshots of background
+  tabs and unfocused windows. It is Firefox's own remote-control protocol, so
+  the extension is not involved and nothing needs signing for it. Typing, keys
+  and clicks run through the headless backend's checks, so the credential
+  guard, the key allowlist and the protected-site rules are the same code. With
+  the port closed, a session held by another client, or a tab that cannot be
+  matched unambiguously, calls go to the extension as before.
+  `browser_safety_status` reports `bidi`. `CLAUDE_BROWSERX_BIDI=0` turns it
+  off; `CLAUDE_BROWSERX_BIDI_PORT` picks the port. When a `browser_type`,
+  `browser_press_key` or plain `browser_click` goes to the extension instead,
+  the result carries `input: "synthetic"` and an `input_note` (start Firefox
+  with `scripts/start-firefox`, or why BiDi was not used for this call), so a
+  page that ignores synthetic events no longer fails silently.
+- The extension reports `incognito` on tabs (`getTabs`, `getTabInfo`), which the
+  server needs before it may photograph a tab itself. Needs a repackaged,
+  re-signed extension; without it screenshots keep using the extension.
 - **Accessibility snapshot and ref tools**, for working on a page without
   writing selectors: `browser_snapshot` (compact tree of roles, names, states
   and values, a stable `ref_N` on each element; `interactive_only`,
@@ -41,6 +64,50 @@ ClaudeCodeBrowserX in 2.0.0.
   the click result is returned as before.
 
 ### Fixed
+- **`browser_find` and `browser_snapshot` saw one item of a grid.** Google
+  Drive's file grid (and any widget with a roving tabindex) gives one cell
+  `tabindex="0"` and every other `tabindex="-1"`, and a `gridcell` only got a
+  ref when it was focusable by Tab, so 49 of 50 folders and files had no ref
+  and `find` for "Ensimag" returned nothing. A `gridcell`, `row`, `cell`,
+  `columnheader`, `rowheader` or `listitem` with any `tabindex`, -1 included,
+  is now treated as something to act on. Other elements with `tabindex="-1"`
+  are unchanged, so a focus-management wrapper is not turned into a leaf that
+  hides what is inside it.
+- **Replacing the server leaked the BiDi session.** `POST /admin/shutdown`
+  (API key required) ends the session and exits, so new server code can be
+  picked up without a hard kill. On Windows, Ctrl+Break to the server's console
+  does the same through the SIGBREAK handler.
+- **A server stopped without ending its BiDi session locked real input out
+  until Firefox was restarted.** Firefox allows one session, and closing only
+  the socket left it counted as open, so every later `session.new` failed with
+  "Maximum number of active sessions" and Google Docs typing went back to
+  synthetic events that Docs ignores. The client now sends `session.end`
+  before closing, and the server ends the session from its exit handler and on
+  SIGTERM/SIGBREAK. A process killed outright (`Stop-Process -Force`,
+  `taskkill /F`, SIGKILL) still cannot, so stop it with a plain `taskkill` or
+  SIGTERM.
+- `browser_safety_status` told the agent to start Firefox with the debugging
+  port when the port was open and the session was merely held. `bidi` now
+  carries `last_error`, and its `hint` says the session is held and that
+  restarting Firefox frees it. The `input_note` on a synthetic result gives
+  the reason BiDi was not used even when it is not connected.
+- **A ref could act on the wrong element.** Google Drive recycles menu nodes,
+  so `ref_77` was "Organiser" in one snapshot and "Partager" in the next, and a
+  click by ref landed on whatever the node held by then. Refs now remember the
+  role and name the snapshot gave them; if the element's accessible name has
+  changed, the call is refused as `stale_ref` (naming both) and nothing is
+  done.
+- `browser_navigate` with `new_tab: true` navigated the tab the person was
+  looking at: the option was in the schema and implemented nowhere. It now
+  opens a new tab, navigates that, and returns its `tab_id`.
+- `browser_type` with no selector refused a focused element inside a
+  same-origin `<iframe>` ("cannot receive typed text"), which is where Google
+  Docs keeps its text input. The preparation script now follows frames as the
+  credential probe already did.
+- **Non-ASCII text was corrupted on its way in.** The stdio wrapper read
+  JSON-RPC from `sys.stdin` as text in the locale encoding (cp1252 on
+  Windows), so `Bézard` reached `browser_type_ref` and every other tool as
+  `BÃ©zard`. It now reads bytes and decodes them as UTF-8.
 - The Python tests used the real `~/.claudecodebrowserx` on Windows
   (`Path.home()` reads `USERPROFILE`, which the test setup did not redirect),
   reading the person's `safety.json` and writing test calls into their audit

@@ -28,6 +28,25 @@ import stdio_wrapper  # noqa: E402
 import server  # noqa: E402
 
 
+class StdinEncodingTests(unittest.TestCase):
+    """Regression: the wrapper read stdin as text in the locale encoding
+    (cp1252 on Windows), turning "Bézard" into "BÃ©zard" before any tool saw
+    it."""
+
+    def test_utf8_message_is_read_intact(self):
+        import io
+        import json
+        message = {'jsonrpc': '2.0', 'id': 1, 'params': {
+            'arguments': {'text': 'Bézard, Grüßen, 日本語, 😀'}}}
+        # ensure_ascii=False: a client may send raw UTF-8, not \u escapes.
+        raw = (json.dumps(message, ensure_ascii=False) + '\n').encode('utf-8')
+        self.assertEqual(stdio_wrapper.read_message(io.BytesIO(raw)), message)
+
+    def test_end_of_input_is_none(self):
+        import io
+        self.assertIsNone(stdio_wrapper.read_message(io.BytesIO(b'')))
+
+
 class UntrustedContentFenceTests(unittest.TestCase):
 
     def setUp(self):

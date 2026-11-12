@@ -486,6 +486,58 @@ The server runs on:
 - HTTP: http://127.0.0.1:8765
 - WebSocket: ws://127.0.0.1:8766
 
+### Real Input and Screenshots (WebDriver BiDi)
+
+The extension can only dispatch synthetic DOM events, and some pages ignore
+those: Google Docs draws on a canvas and takes its text from a hidden frame
+that only real keystrokes reach, so `browser_type` could report success without
+a letter appearing. Firefox extensions have no equivalent of Chrome's
+`chrome.debugger`, so the server talks to Firefox directly instead, over
+WebDriver BiDi (`mcp-server/bidi.py`).
+
+Start Firefox with its debugging port open (it has to be started that way;
+a running Firefox cannot switch it on):
+
+```bash
+scripts/start-firefox.sh            # Linux / macOS
+.\scripts\start-firefox.ps1         # Windows
+```
+
+That is the same Firefox, profile and extension as always, plus one flag
+(`--remote-debugging-port=9222`). The server finds it on its own. Then:
+
+| Tool | With the port open |
+|------|--------------------|
+| `browser_type` | Real keystrokes (`isTrusted`), any Unicode text intact, typed at the caret and replacing a selection. Works in Google Docs: click the page, then type with no selector. |
+| `browser_press_key` | Real key presses and combinations, so `Ctrl+A`, then typing, replaces text. |
+| `browser_click` | A real click for a selector or a point (XPath, text, double and right clicks stay with the extension). |
+| `browser_screenshot` | Captures a tab that is in the background or in an unfocused window, and `full_page` works. |
+
+Nothing else changes. Tab ids, the safety guard, protected sites, the
+credential rules (typing into a password field is refused, and so is a
+clipboard or character key pressed in one) and the human-approval prompts all
+apply as before: typing, key presses and clicks run through the same checks as
+the headless backend. If the port is not open, another program holds Firefox's
+one BiDi session (a second Claude session, say), or the tab cannot be matched
+unambiguously, the call goes to the extension exactly as it did before, and
+the result says so: `input: "synthetic"` and an `input_note` explaining that
+some pages (Google Docs) ignore synthetic events, so success does not prove the
+text arrived, and what to do about it. That way forgetting to start Firefox with
+the port shows up in the very call that may have failed.
+`browser_safety_status` reports which you have under `bidi`.
+
+Two things to know. The port listens on localhost only, but any program on
+your machine that can reach it can drive your browser, so start Firefox with
+the script only when you want this; the project never opens it for you. And
+screenshots taken this way need the extension to report `incognito` for the tab
+(a build that includes the change listed under Unreleased in the changelog; the
+extension has to be repackaged and re-signed), since a private window's
+screenshot must not be written to disk. With an older extension screenshots use
+the extension's path; typing, keys and clicks are not affected.
+
+`CLAUDE_BROWSERX_BIDI=0` turns it off. `CLAUDE_BROWSERX_BIDI_PORT` picks another
+port (default 9222).
+
 ### Headless Mode
 
 Run without any visible browser — ideal for CI, servers, and unattended tasks.
