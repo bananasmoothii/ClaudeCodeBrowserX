@@ -625,6 +625,44 @@ test('find by text returns refs with their heading, by role filters, limit caps'
   assert.equal(call('find', { text: 'nope' }).total_matches, 0);
 });
 
+test('an exact find that misses offers the substring matches as near_matches', () => {
+  const { call } = session((d, b) => {
+    b.add(el(d, 'button', {}, 'Ensimag Dossier de couleur Vert prairie'));
+    b.add(el(d, 'button', {}, 'Ensimag Archive'));
+    b.add(el(d, 'a', { href: '/x' }, 'Other'));
+  });
+  const miss = call('find', { text: 'Ensimag', exact: true });
+  assert.equal(miss.total_matches, 0);
+  assert.deepEqual(miss.matches, []);
+  assert.equal(miss.total_near_matches, 2);
+  assert.deepEqual(miss.near_matches.map(m => m.ref), ['ref_1', 'ref_2']);
+  assert.match(miss.note, /without exact/);
+  // role and interactive_only narrow the near matches like they narrow matches
+  assert.equal(call('find', { text: 'Ensimag', exact: true, role: 'link' }).near_matches, undefined);
+  // an exact hit, and a plain search that misses, carry no near_matches
+  const hit = call('find', { text: 'ensimag archive', exact: true });
+  assert.equal(hit.total_matches, 1);
+  assert.equal(hit.near_matches, undefined);
+  assert.equal(call('find', { text: 'nope', exact: true }).near_matches, undefined);
+  assert.equal(call('find', { text: 'nope' }).near_matches, undefined);
+});
+
+test('near_matches are capped and never return a credential value', () => {
+  const { call } = session((d, b) => {
+    for (let i = 0; i < 8; i++) b.add(el(d, 'button', {}, 'Row ' + i + ' extra'));
+  });
+  const r = call('find', { text: 'Row', exact: true });
+  assert.equal(r.near_matches.length, 5);
+  assert.equal(r.total_near_matches, 8);
+  const { call: callLogin } = session(login);
+  const l = callLogin('find', { text: 'Passw', exact: true });
+  assert.equal(l.near_matches.length, 1);
+  assert.equal(l.near_matches[0].name, 'Password');
+  assert.ok(!JSON.stringify(l).includes('hunter2'));
+  const pin = callLogin('find', { text: 'textbox', exact: true });
+  assert.ok(!JSON.stringify(pin).includes('secret-pin-91'));
+});
+
 test('find refs are the ones snapshot prints, and they work', () => {
   const { call } = session(shop);
   const ref = call('find', { text: 'sign in' }).matches[0].ref;

@@ -26,6 +26,20 @@ ClaudeCodeBrowserX in 2.0.0.
   fields use `extension/credentials.js` and are never printed or typed into
   (unless `allow_password_typing`). The installers copy the two new files.
 
+### Changed
+- `browser_find` with `exact: true` that finds nothing now lists the elements
+  whose name merely contains the text as `near_matches` (up to five, with
+  `total_near_matches` and a note). An accessible name is often longer than the
+  visible label, so an exact search for "Ensimag" missed a Drive row named
+  "Ensimag Dossier de couleur ... Plus d'infos". `matches` is unchanged: exact
+  still means exact.
+- `browser_click_ref` waits a moment after the click, then reports where the
+  page landed: `navigated`, the new `url` and `title`, and `url_before`. It
+  looks again, for a few seconds at most, while the tab is still loading. The
+  safety guard now judges the next call against the landing page rather than
+  the page the click was made on. Best effort: if the browser cannot be asked,
+  the click result is returned as before.
+
 ### Fixed
 - The Python tests used the real `~/.claudecodebrowserx` on Windows
   (`Path.home()` reads `USERPROFILE`, which the test setup did not redirect),

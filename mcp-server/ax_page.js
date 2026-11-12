@@ -598,31 +598,60 @@
       }
       return true;
     });
-    var shown = hits.slice(0, limit).map(function (e) {
+    function describe(e) {
       return { ref: e.ref, role: e.role, name: e.name, attributes: e.flags,
                after_heading: e.heading };
-    });
-    // One scrub over everything returned, not one per match.
-    var glue = '\u0001';
-    var joined = scrub(shown.map(function (m) {
-      return [m.name, m.attributes.join(glue), m.after_heading || ''].join(glue + glue);
-    }).join(glue + glue + glue), scope.root);
-    if (joined.masked) {
-      var rows = joined.text.split(glue + glue + glue);
-      shown.forEach(function (m, i) {
-        var bits = (rows[i] || '').split(glue + glue);
-        m.name = bits[0] || '';
-        m.attributes = (bits[1] || '').split(glue).filter(Boolean);
-        m.after_heading = bits[2] || null;
-      });
     }
+    // One scrub over everything in a list, not one per match. Returns how many
+    // secrets it masked.
+    var glue = '\u0001';
+    function scrubAll(list) {
+      var joined = scrub(list.map(function (m) {
+        return [m.name, m.attributes.join(glue), m.after_heading || ''].join(glue + glue);
+      }).join(glue + glue + glue), scope.root);
+      if (joined.masked) {
+        var rows = joined.text.split(glue + glue + glue);
+        list.forEach(function (m, i) {
+          var bits = (rows[i] || '').split(glue + glue);
+          m.name = bits[0] || '';
+          m.attributes = (bits[1] || '').split(glue).filter(Boolean);
+          m.after_heading = bits[2] || null;
+        });
+      }
+      return joined.masked || 0;
+    }
+
+    var shown = hits.slice(0, limit).map(describe);
+    var masked = scrubAll(shown);
     var out = pageFacts();
     out.ok = true;
     out.matches = shown;
     out.total_matches = hits.length;
     out.returned = shown.length;
     out.truncated = hits.length > shown.length || S.truncated;
-    if (joined.masked) out.masked_secrets = joined.masked;
+
+    // exact compares the whole accessible name, and a name is often longer than
+    // the label you can see (a Drive row reads "Ensimag Dossier de couleur ...
+    // Plus d'infos"). Zero matches is then a miss, not an answer: offer what a
+    // substring search finds. They stay out of "matches" so exact still means
+    // exact.
+    if (exact && text && hits.length === 0) {
+      var near = S.entries.filter(function (e) {
+        if (interactiveOnly && !e.interactive) return false;
+        if (role && e.role !== role) return false;
+        return (e.name + ' ' + e.flags.join(' ')).toLowerCase().indexOf(text) >= 0;
+      });
+      if (near.length) {
+        var nearShown = near.slice(0, 5).map(describe);
+        masked += scrubAll(nearShown);
+        out.near_matches = nearShown;
+        out.total_near_matches = near.length;
+        out.note = 'No element has exactly that name, but ' + near.length +
+          (near.length === 1 ? ' contains' : ' contain') + ' it (near_matches). A name is ' +
+          'often longer than the visible label; retry without exact to match part of it.';
+      }
+    }
+    if (masked) out.masked_secrets = masked;
     return out;
   }
 

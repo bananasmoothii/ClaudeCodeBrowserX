@@ -227,6 +227,70 @@ def build_script(command: str, args: Dict[str, Any], allow_password: bool = Fals
     return _load_template().replace('/*__COMMAND__*/ null', payload)
 
 
+# browser_click_ref reports where the page ended up. The page script cannot: it
+# returns the instant the events are dispatched, and a click that navigates has
+# not navigated yet. So the server waits a moment, then asks the browser for the
+# tab's URL (see landing). These bound how long: a first look, then a few more
+# while the tab still says it is loading.
+CLICK_SETTLE_SECONDS = 0.4
+CLICK_LOADING_POLLS = 3
+CLICK_LOADING_POLL_SECONDS = 0.5
+
+
+def landing(result: Dict[str, Any], tabs_response: Any,
+            tab_id: Optional[int] = None) -> Tuple[Dict[str, Any], bool]:
+    """Fold the tab's URL after a click into a browser_click_ref result.
+
+    tabs_response is what the getTabs action returned. The tab is the one named
+    by tab_id, else the active one. Returns (result, loading): loading is True
+    when the tab says it is still loading, so the caller may look again.
+
+    Anything unexpected leaves the result as the page script made it, because
+    the click has already happened and this is only extra information.
+    """
+    if not isinstance(tabs_response, dict) or not tabs_response.get('success'):
+        return result, False
+    tabs = tabs_response.get('tabs')
+    if not isinstance(tabs, list):
+        return result, False
+    tab = None
+    for candidate in tabs:
+        if not isinstance(candidate, dict):
+            continue
+        if tab_id is not None:
+            if candidate.get('id') == tab_id:
+                tab = candidate
+                break
+        elif candidate.get('active'):
+            tab = candidate
+            break
+    after = tab.get('url') if tab else None
+    if not isinstance(after, str) or not after:
+        return result, False
+
+    before = result.get('url')
+    loading = tab.get('status') == 'loading'
+    out = dict(result)
+    title = tab.get('title')
+    if after != before:
+        out['navigated'] = True
+        out['url_before'] = before
+        out['url'] = after
+        if isinstance(title, str):
+            out['title'] = title
+        out['note'] = ('The click changed the page: url and title are where it landed'
+                       + (' (still loading)' if loading else '')
+                       + '. Call browser_snapshot before using any ref.')
+    else:
+        out['navigated'] = False
+        if isinstance(title, str) and title:
+            out['title'] = title
+        if loading:
+            out['note'] = ('The page is still loading, so the URL may change. Call '
+                           'browser_snapshot before using any ref.')
+    return out, loading
+
+
 def interpret(raw: Any) -> Dict[str, Any]:
     """Turn what ax_page.js returned into a tool result."""
     if not isinstance(raw, dict):

@@ -205,6 +205,72 @@ class InterpretTests(unittest.TestCase):
             self.assertIn('no result', result['error'])
 
 
+class LandingTests(unittest.TestCase):
+
+    CLICK = {'success': True, 'url': 'https://example.com/search', 'title': 'Search',
+             'note': 'url/title are from just after the click'}
+
+    def _tabs(self, *tabs):
+        return {'success': True, 'tabs': list(tabs)}
+
+    def test_a_click_that_navigated_reports_where_it_landed(self):
+        result, loading = ax.landing(self.CLICK, self._tabs(
+            {'id': 3, 'url': 'https://example.com/folder', 'title': 'Folder',
+             'active': True, 'status': 'complete'}))
+        self.assertTrue(result['navigated'])
+        self.assertEqual(result['url'], 'https://example.com/folder')
+        self.assertEqual(result['url_before'], 'https://example.com/search')
+        self.assertEqual(result['title'], 'Folder')
+        self.assertIn('landed', result['note'])
+        self.assertFalse(loading)
+
+    def test_the_input_result_is_not_modified(self):
+        before = dict(self.CLICK)
+        ax.landing(self.CLICK, self._tabs(
+            {'id': 3, 'url': 'https://example.com/x', 'active': True}))
+        self.assertEqual(self.CLICK, before)
+
+    def test_a_click_that_stayed_put_says_so_and_keeps_the_page_note(self):
+        result, _ = ax.landing(self.CLICK, self._tabs(
+            {'id': 3, 'url': 'https://example.com/search', 'title': 'Search (2)',
+             'active': True, 'status': 'complete'}))
+        self.assertIs(result['navigated'], False)
+        self.assertNotIn('url_before', result)
+        self.assertEqual(result['title'], 'Search (2)')
+        self.assertEqual(result['note'], self.CLICK['note'])
+
+    def test_a_loading_tab_is_flagged_so_the_caller_looks_again(self):
+        result, loading = ax.landing(self.CLICK, self._tabs(
+            {'id': 3, 'url': 'https://example.com/next', 'active': True,
+             'status': 'loading'}))
+        self.assertTrue(loading)
+        self.assertIn('still loading', result['note'])
+        result, loading = ax.landing(self.CLICK, self._tabs(
+            {'id': 3, 'url': 'https://example.com/search', 'active': True,
+             'status': 'loading'}))
+        self.assertTrue(loading)
+        self.assertIn('still loading', result['note'])
+
+    def test_the_tab_is_the_one_named_else_the_active_one(self):
+        tabs = self._tabs(
+            {'id': 1, 'url': 'https://example.com/a', 'active': True},
+            {'id': 2, 'url': 'https://example.com/b', 'active': False})
+        self.assertEqual(ax.landing(self.CLICK, tabs, 2)[0]['url'], 'https://example.com/b')
+        self.assertEqual(ax.landing(self.CLICK, tabs)[0]['url'], 'https://example.com/a')
+
+    def test_anything_unexpected_leaves_the_result_alone(self):
+        for response in (None, 'x', {'success': False, 'error': 'no browser'},
+                         {'success': True}, {'success': True, 'tabs': 'nope'},
+                         self._tabs(), self._tabs({'id': 1, 'active': True}),
+                         self._tabs({'id': 9, 'url': 'https://example.com/z',
+                                     'active': False}),
+                         self._tabs('junk', None)):
+            with self.subTest(response=response):
+                result, loading = ax.landing(self.CLICK, response, 1)
+                self.assertEqual(result, self.CLICK)
+                self.assertFalse(loading)
+
+
 class GuardTests(unittest.TestCase):
 
     def test_every_tool_is_covered_by_the_script_toggle(self):
@@ -331,12 +397,24 @@ class ServerDispatchTests(unittest.TestCase):
                                   'max_actions_per_minute': 100000})
         self.guard.note_url({'url': 'https://example.com/'})
         self.addCleanup(self.guard.note_url, {'url': 'https://example.com/'})
+        # A click waits for the page to settle; the tests need not.
+        for name in ('CLICK_SETTLE_SECONDS', 'CLICK_LOADING_POLL_SECONDS'):
+            self.addCleanup(setattr, ax, name, getattr(ax, name))
+            setattr(ax, name, 0)
 
-    def _execute(self, tool, arguments, page_result=None):
+    def _execute(self, tool, arguments, page_result=None, tabs=None):
+        """tabs: what the getTabs action answers (a dict), a list of answers
+        (one per call, the last repeated), or None to answer it like every
+        other action."""
         calls = []
 
         def fake_dispatch(action, tab_id, args):
             calls.append({'action': action, 'tab_id': tab_id, 'args': args})
+            if action == 'getTabs' and tabs is not None:
+                seen = sum(1 for c in calls if c['action'] == 'getTabs')
+                if isinstance(tabs, list):
+                    return tabs[min(seen, len(tabs)) - 1]
+                return tabs
             return {'success': True, 'result': page_result if page_result is not None
                     else {'ok': True, 'url': 'https://example.com/'}}
 
@@ -373,6 +451,90 @@ class ServerDispatchTests(unittest.TestCase):
                 result, calls = self._execute(tool, args)
                 self.assertTrue(result['success'], result)
                 self.assertEqual(self._payload(calls[0])['command'], command)
+
+    def _tabs(self, url, status='complete', title='Landed'):
+        return {'success': True, 'tabs': [
+            {'id': 7, 'url': url, 'title': title, 'active': True, 'status': status}]}
+
+    def test_a_click_reports_the_page_it_landed_on(self):
+        result, calls = self._execute(
+            'browser_click_ref', {'ref': 'ref_2'},
+            {'ok': True, 'url': 'https://example.com/search', 'title': 'Search'},
+            tabs=self._tabs('https://example.com/folder'))
+        self.assertTrue(result['success'], result)
+        self.assertTrue(result['navigated'])
+        self.assertEqual(result['url'], 'https://example.com/folder')
+        self.assertEqual(result['url_before'], 'https://example.com/search')
+        self.assertEqual([c['action'] for c in calls], ['executeScript', 'getTabs'])
+        self.assertIs(calls[1]['args']['current_window_only'], True)
+
+    def test_a_click_on_a_named_tab_looks_in_every_window(self):
+        _, calls = self._execute(
+            'browser_click_ref', {'ref': 'ref_2', 'tab_id': 7},
+            tabs=self._tabs('https://example.com/'))
+        self.assertIs(calls[1]['args']['current_window_only'], False)
+
+    def test_the_guard_judges_the_next_call_against_the_landing_page(self):
+        self._execute('browser_click_ref', {'ref': 'ref_2'},
+                      {'ok': True, 'url': 'https://example.com/'},
+                      tabs=self._tabs('https://www.chase.com/login'))
+        result, calls = self._execute('browser_find', {'text': 'x'})
+        self.assertEqual(result['safety_decision'], 'scripts_denied_on_protected_url')
+        self.assertEqual(calls, [])
+
+    def test_a_loading_page_is_looked_at_again_until_it_settles(self):
+        result, calls = self._execute(
+            'browser_click_ref', {'ref': 'ref_2'},
+            {'ok': True, 'url': 'https://example.com/'},
+            tabs=[self._tabs('https://example.com/next', 'loading', 'Loading'),
+                  self._tabs('https://example.com/next', 'complete', 'Next')])
+        self.assertEqual([c['action'] for c in calls].count('getTabs'), 2)
+        self.assertEqual(result['title'], 'Next')
+        self.assertNotIn('still loading', result['note'])
+
+    def test_a_page_that_never_finishes_loading_is_not_waited_for_forever(self):
+        result, calls = self._execute(
+            'browser_click_ref', {'ref': 'ref_2'},
+            {'ok': True, 'url': 'https://example.com/'},
+            tabs=self._tabs('https://example.com/slow', 'loading'))
+        self.assertEqual([c['action'] for c in calls].count('getTabs'),
+                         1 + ax.CLICK_LOADING_POLLS)
+        self.assertIn('still loading', result['note'])
+
+    def test_a_failed_look_does_not_turn_a_click_that_worked_into_an_error(self):
+        for tabs in ({'success': False, 'error': 'No browser connected'},):
+            result, _ = self._execute('browser_click_ref', {'ref': 'ref_2'}, tabs=tabs)
+            self.assertTrue(result['success'], result)
+            self.assertNotIn('navigated', result)
+
+        handler = server.MCPHTTPHandler.__new__(server.MCPHTTPHandler)
+
+        def fake_dispatch(action, tab_id, args):
+            if action == 'getTabs':
+                raise RuntimeError('socket closed')
+            return {'success': True, 'result': {'ok': True, 'url': 'https://example.com/'}}
+
+        handler._dispatch_action = fake_dispatch
+        result = handler.execute_tool('browser_click_ref', {'ref': 'ref_2'})
+        self.assertTrue(result['success'], result)
+        self.assertNotIn('navigated', result)
+
+    def test_only_a_click_looks_at_the_tabs(self):
+        for tool, args in (('browser_hover_ref', {'ref': 'ref_2'}),
+                           ('browser_type_ref', {'ref': 'ref_2', 'text': 'hi'}),
+                           ('browser_find', {'text': 'Buy'}),
+                           ('browser_snapshot', {})):
+            with self.subTest(tool=tool):
+                _, calls = self._execute(tool, args,
+                                         tabs=self._tabs('https://example.com/'))
+                self.assertEqual([c['action'] for c in calls], ['executeScript'])
+
+    def test_a_click_that_failed_does_not_look_at_the_tabs(self):
+        _, calls = self._execute(
+            'browser_click_ref', {'ref': 'ref_9'},
+            {'ok': False, 'code': 'stale_ref', 'error': 'ref_9 is stale'},
+            tabs=self._tabs('https://example.com/'))
+        self.assertEqual([c['action'] for c in calls], ['executeScript'])
 
     def test_a_bad_argument_is_refused_before_anything_is_sent(self):
         result, calls = self._execute('browser_click_ref', {'ref': 'nope'})

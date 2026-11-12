@@ -1041,7 +1041,8 @@ MCP_TOOLS: List[MCPTool] = [
             "Search the page's accessibility tree by text and/or role and return the matching refs "
             "(ref, role, name, states, and the heading each sits under). text is a case-insensitive "
             "substring of the name, value or link target (exact: true compares the whole name); role "
-            "is an ARIA role such as button, link, textbox, checkbox, heading. Matches are elements; "
+            "is an ARIA role such as button, link, textbox, checkbox, heading. If exact finds nothing "
+            "but a substring would, the result lists those as near_matches. Matches are elements; "
             "to read prose use browser_get_text. Refs are the same ones browser_snapshot prints. "
             "Same safety rules as browser_snapshot."),
         input_schema={
@@ -1063,8 +1064,10 @@ MCP_TOOLS: List[MCPTool] = [
             "Click the element a ref names (from browser_snapshot or browser_find). It is scrolled "
             "into view and sent pointer and mouse events and one click. A stale or unknown ref "
             "returns an error telling you to take a new snapshot. The result says if the page "
-            "cancelled the click, if the element is disabled, and if something covers it. After a "
-            "click that navigates or re-renders, take a new snapshot before the next ref. Runs a "
+            "cancelled the click, if the element is disabled, and if something covers it. It waits "
+            "a moment after the click and reports navigated, with the url and title the page landed "
+            "on (url_before is where it was). After a click that navigates or re-renders, take a new "
+            "snapshot before the next ref. Runs a "
             "fixed script in the page: refused when allow_script_execution is false, in read-only "
             "mode, and on a protected URL."),
         input_schema={
@@ -2005,6 +2008,12 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
 
         result = ax.interpret(raw.get('result'))
 
+        # A click may have navigated, and the page script answered before it
+        # did. Look again, so the result names the page the click landed on and
+        # the guard below judges the next call against that page, not this one.
+        if tool_name == 'browser_click_ref' and result.get('success'):
+            result = self._settle_click(result, arguments.get('tab_id'))
+
         # The result names the page it came from; tell the guard, so the next
         # call is judged against it. Then judge this one against it too: the
         # first script tool of a session ran before the guard knew the URL.
@@ -2014,6 +2023,34 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
             if denial is not None:
                 return denial
         return result
+
+    def _settle_click(self, result: Dict[str, Any],
+                      tab_id: Optional[int]) -> Dict[str, Any]:
+        """Add the tab's URL a moment after a ref click to its result.
+
+        Best effort: the click has already happened, so a failure here returns
+        the result as it was rather than reporting a click that worked as one
+        that did not.
+        """
+        time.sleep(ax.CLICK_SETTLE_SECONDS)
+        polls = 0
+        landed = result
+        while True:
+            try:
+                tabs = self._dispatch_action(
+                    'getTabs', None,
+                    {'current_window_only': tab_id is None})
+                # Always from the page script's own result: url_before and
+                # navigated compare against where the click happened, not
+                # against the previous look.
+                landed, loading = ax.landing(result, tabs, tab_id)
+            except Exception as e:
+                logger.warning(f"browser_click_ref: could not read the landing page: {e}")
+                return landed
+            if not loading or polls >= ax.CLICK_LOADING_POLLS:
+                return landed
+            polls += 1
+            time.sleep(ax.CLICK_LOADING_POLL_SECONDS)
 
     def _save_screenshot(self, result: Dict[str, Any], arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Save screenshot data to file."""
