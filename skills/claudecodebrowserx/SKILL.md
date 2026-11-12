@@ -12,7 +12,27 @@ Safety rules (credential guard, protected URLs, audit log) are in
 Load the tools you need with one ToolSearch (`select:` several names); they are
 deferred.
 
-## 1. Always start with `browser_safety_status`
+## 0. Firefox has to be running (start it yourself)
+
+These tools need a running Firefox. The MCP server is separate and usually up;
+it cannot open a browser. If Firefox is closed, every call fails.
+
+- `browser_safety_status` reports `extension.firefox_running` and
+  `extension.connected`. A call that fails with "Firefox is not running" or (older
+  servers) "Command … timed out waiting for browser response after 30s" means the
+  same thing: check `Get-Process firefox` / `pgrep -x firefox`.
+- **Firefox not running: start it yourself**, without asking, by running
+  `scripts/start-firefox.ps1` (Windows) or `start-firefox.sh` from the repo. It
+  uses the normal profile and opens the BiDi port, so real input works too. Wait
+  a few seconds, then call `browser_safety_status` until `extension.connected` is
+  `true` (the extension connects once Firefox has loaded). Tabs may come back
+  with new ids.
+- Firefox running but `extension.connected` stays `false`: the extension is
+  disabled or not installed (`about:addons`). Tell the user; do not restart
+  their Firefox.
+- Do not keep retrying a tool that says Firefox is not running.
+
+## 1. Then read `browser_safety_status`
 
 Look at `bidi`:
 

@@ -49,6 +49,7 @@ from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 import threading
 import socket
+import subprocess
 
 # Configure logging
 LOG_DIR = Path.home() / '.claudecodebrowserx' / 'logs'
@@ -179,6 +180,81 @@ _REFUSED_BODY_DRAIN_BYTES = 64 * 1024
 # is not discarded, but finite so a command cannot execute long after the
 # caller abandoned it.
 COMMAND_QUEUE_TTL = float(env('COMMAND_TTL', '240'))
+
+# When the extension's native host last asked for work. It polls every 500 ms
+# for as long as Firefox runs with the extension, so a long silence means there
+# is no browser to act in. Without this, every call to a closed Firefox waited
+# 30 s and reported a bare timeout, and an agent could not tell "Firefox is
+# not running" from "the page is slow".
+LAST_POLL_AT: Optional[float] = None
+EXTENSION_SILENCE_LIMIT = float(env('EXTENSION_SILENCE', '5'))
+# A server that has just started has not been polled yet; give the native
+# host this long to show up before calling the browser unreachable.
+EXTENSION_GRACE = float(env('EXTENSION_GRACE', '3'))
+
+
+def _firefox_running() -> Optional[bool]:
+    """Whether a Firefox process exists. None when that cannot be told."""
+    try:
+        if sys.platform == 'win32':
+            out = subprocess.run(
+                ['tasklist', '/FI', 'IMAGENAME eq firefox.exe', '/NH'],
+                capture_output=True, text=True, timeout=3).stdout
+            return 'firefox.exe' in out.lower()
+        return subprocess.run(['pgrep', '-x', 'firefox'],
+                              capture_output=True, timeout=3).returncode == 0
+    except Exception:
+        return None
+
+
+def _extension_silent_for() -> Optional[float]:
+    """Seconds since the extension last polled; None if it never has."""
+    return None if LAST_POLL_AT is None else time.time() - LAST_POLL_AT
+
+
+def _extension_state() -> Dict[str, Any]:
+    silent = _extension_silent_for()
+    return {
+        'last_poll_seconds_ago': None if silent is None else round(silent, 1),
+        'connected': silent is not None and silent <= EXTENSION_SILENCE_LIMIT,
+        'firefox_running': _firefox_running(),
+    }
+
+
+def _browser_unreachable(action: str) -> Optional[Dict[str, Any]]:
+    """An error result when no browser is polling for commands, else None.
+
+    Waits up to EXTENSION_GRACE seconds for a poll first. Nothing is queued
+    when this answers, so no stale command can run once Firefox comes back.
+    """
+    deadline = time.monotonic() + EXTENSION_GRACE
+    while True:
+        silent = _extension_silent_for()
+        if silent is not None and silent <= EXTENSION_SILENCE_LIMIT:
+            return None
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.25)
+    running = _firefox_running()
+    if running is False:
+        why = ('Firefox is not running, so there is no browser to act in. '
+               'Start it with scripts/start-firefox.ps1 (or start-firefox.sh) '
+               'from the ClaudeCodeBrowserX checkout, which also opens the '
+               'debugging port for real keystrokes, then try again.')
+    elif running is True:
+        why = ('Firefox is running but the ClaudeCodeBrowserX extension has not '
+               'contacted the server%s. Check that the extension is installed '
+               'and enabled (about:addons) and that Firefox is not stuck on a '
+               'dialog, then try again.'
+               % ('' if silent is None else f' for {silent:.0f}s'))
+    else:
+        why = ('No browser has contacted the server%s. Firefox may not be '
+               'running (start it with scripts/start-firefox.ps1 or '
+               'start-firefox.sh), or the extension is not loaded.'
+               % ('' if silent is None else f' for {silent:.0f}s'))
+    return {'success': False, 'error': f'{why} Nothing was sent ({action}).',
+            'action': action, 'firefox_running': running,
+            'extension': _extension_state()}
 
 # Screenshots directory: ~/.claudecodebrowserx/screenshots (0700), or wherever
 # CLAUDE_BROWSERX_SCREENSHOTS_DIR points.
@@ -1329,6 +1405,8 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
             self.send_json_response({'screenshots': sorted(screenshots, key=lambda x: x['created'], reverse=True)})
 
         elif parsed.path == '/browser/poll':
+            global LAST_POLL_AT
+            LAST_POLL_AT = time.time()
             # Extension/native host polls for pending commands
             # Pop under the lock: two pollers could both pass an unguarded
             # "if pending" and the loser would raise IndexError. Expired
@@ -1541,6 +1619,8 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
             status['mode'] = 'headless' if HEADLESS_MODE else 'attended'
             status['headless_only_tools'] = sorted(HEADLESS_ONLY_TOOLS)
             status['browsers_connected'] = len(connection_manager.browser_connections)
+            if not HEADLESS_MODE:
+                status['extension'] = _extension_state()
             # Whether typing, keys, clicks and screenshots can use real
             # input; asked here so "call this first" tells the whole story.
             if not HEADLESS_MODE:
@@ -1844,6 +1924,14 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 logger.error(f"Headless backend failed: {e}")
                 return {'success': False, 'error': f'Headless execution failed: {e}'}
+
+        # With no WebSocket browser the only way in is the native host's polling.
+        # If nothing has polled lately there is no browser: say so now, and
+        # queue nothing, instead of timing out 30 s later.
+        if browser is None:
+            unreachable = _browser_unreachable(action)
+            if unreachable is not None:
+                return unreachable
 
         # No WebSocket connection — use HTTP polling with the native host.
         # ThreadingHTTPServer ensures /browser/poll and /browser/response are

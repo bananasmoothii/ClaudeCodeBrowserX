@@ -1606,5 +1606,72 @@ class CleanShutdownTests(unittest.TestCase):
         self.assertLess(source.index('_check_auth'), source.index('/admin/shutdown'))
 
 
+class BrowserUnreachableTests(unittest.TestCase):
+    """No Firefox means no polling: say so at once instead of timing out."""
+
+    def setUp(self):
+        patcher = unittest.mock.patch.object(server, 'EXTENSION_GRACE', 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(setattr, server, 'LAST_POLL_AT', server.LAST_POLL_AT)
+
+    def test_a_recent_poll_means_the_browser_is_there(self):
+        server.LAST_POLL_AT = time.time()
+        self.assertIsNone(server._browser_unreachable('getTabs'))
+
+    def test_a_closed_firefox_is_named_and_nothing_is_sent(self):
+        server.LAST_POLL_AT = time.time() - 600
+        with unittest.mock.patch.object(server, '_firefox_running', return_value=False):
+            out = server._browser_unreachable('createTab')
+        self.assertFalse(out['success'])
+        self.assertIn('Firefox is not running', out['error'])
+        self.assertIn('start-firefox', out['error'])
+        self.assertIn('Nothing was sent', out['error'])
+        self.assertIs(out['firefox_running'], False)
+
+    def test_a_running_firefox_without_the_extension_says_so(self):
+        server.LAST_POLL_AT = None
+        with unittest.mock.patch.object(server, '_firefox_running', return_value=True):
+            out = server._browser_unreachable('getTabs')
+        self.assertIn('extension has not contacted the server', out['error'])
+        self.assertIn('about:addons', out['error'])
+
+    def test_when_firefox_cannot_be_checked_both_causes_are_named(self):
+        server.LAST_POLL_AT = None
+        with unittest.mock.patch.object(server, '_firefox_running', return_value=None):
+            out = server._browser_unreachable('getTabs')
+        self.assertIn('may not be running', out['error'])
+
+    def test_a_late_first_poll_is_waited_for(self):
+        server.LAST_POLL_AT = None
+        with unittest.mock.patch.object(server, 'EXTENSION_GRACE', 2.0):
+            threading.Timer(0.3, lambda: setattr(server, 'LAST_POLL_AT', time.time())).start()
+            started = time.monotonic()
+            self.assertIsNone(server._browser_unreachable('getTabs'))
+            self.assertLess(time.monotonic() - started, 1.5)
+
+    def test_dispatch_returns_the_error_without_queueing_a_command(self):
+        server.LAST_POLL_AT = time.time() - 600
+        handler = server.MCPHTTPHandler.__new__(server.MCPHTTPHandler)
+        handler.server = unittest.mock.Mock(_pending_commands=[])
+        with unittest.mock.patch.object(server, 'HEADLESS_MODE', False),                 unittest.mock.patch.object(server.bidi, 'get_bidi_backend',
+                                           return_value=unittest.mock.Mock(wants=lambda *a: False)),                 unittest.mock.patch.object(server.connection_manager, 'get_active_browser',
+                                           return_value=None),                 unittest.mock.patch.object(server, '_firefox_running', return_value=False):
+            started = time.monotonic()
+            out = handler._dispatch_action('createTab', None, {'url': 'about:blank'})
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertFalse(out['success'])
+        self.assertIn('Firefox is not running', out['error'])
+        self.assertEqual(handler.server._pending_commands, [])
+
+    def test_safety_status_reports_the_extension(self):
+        server.LAST_POLL_AT = time.time()
+        handler = server.MCPHTTPHandler.__new__(server.MCPHTTPHandler)
+        with unittest.mock.patch.object(server, '_firefox_running', return_value=True):
+            out = handler.execute_tool('browser_safety_status', {})
+        self.assertTrue(out['extension']['connected'])
+        self.assertIs(out['extension']['firefox_running'], True)
+
+
 if __name__ == '__main__':
     unittest.main()

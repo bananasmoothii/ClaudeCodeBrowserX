@@ -64,6 +64,16 @@ ClaudeCodeBrowserX in 2.0.0.
   the click result is returned as before.
 
 ### Fixed
+- **A closed Firefox looked like a 30-second timeout.** With no browser polling,
+  every call waited 30 s and returned "timed out waiting for browser response",
+  so an agent could not tell "Firefox is not running" from a slow page and did
+  not start it. The server now records when the extension last polled; with no
+  poll for 5 s (after a 3 s grace for a freshly started server) a call returns
+  at once, queues nothing, and says whether Firefox is not running (start it
+  with `scripts/start-firefox`) or is running without a connected extension.
+  `browser_safety_status` gains `extension` (`connected`,
+  `last_poll_seconds_ago`, `firefox_running`). The usage skill now starts with
+  "Firefox has to be running" and tells the agent to start it itself.
 - **`browser_find` and `browser_snapshot` saw one item of a grid.** Google
   Drive's file grid (and any widget with a roving tabindex) gives one cell
   `tabindex="0"` and every other `tabindex="-1"`, and a `gridcell` only got a
