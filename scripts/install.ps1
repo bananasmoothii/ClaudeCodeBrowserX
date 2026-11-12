@@ -70,7 +70,7 @@ foreach ($sub in @("native-host", "mcp-server", "agent", "screenshots", "logs"))
 }
 
 Copy-Item (Join-Path $RepoRoot "native-host\claudecodebrowserx_host.py") (Join-Path $InstallDir "native-host\")
-foreach ($f in @("server.py", "safety.py", "headless_backend.py", "stdio_wrapper.py")) {
+foreach ($f in @("server.py", "safety.py", "headless_backend.py", "stdio_wrapper.py", "ax.py", "ax_page.js")) {
     Copy-Item (Join-Path $RepoRoot "mcp-server\$f") (Join-Path $InstallDir "mcp-server\")
 }
 # The one definition of a credential, shared with the extension; headless

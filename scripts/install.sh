@@ -107,6 +107,9 @@ cp "$SCRIPT_DIR/mcp-server/server.py" "$INSTALL_DIR/mcp-server/"
 cp "$SCRIPT_DIR/mcp-server/safety.py" "$INSTALL_DIR/mcp-server/"
 cp "$SCRIPT_DIR/mcp-server/headless_backend.py" "$INSTALL_DIR/mcp-server/"
 cp "$SCRIPT_DIR/mcp-server/stdio_wrapper.py" "$INSTALL_DIR/mcp-server/"
+# Accessibility snapshot / ref tools: the module and the page script it sends.
+cp "$SCRIPT_DIR/mcp-server/ax.py" "$INSTALL_DIR/mcp-server/"
+cp "$SCRIPT_DIR/mcp-server/ax_page.js" "$INSTALL_DIR/mcp-server/"
 # The one definition of a credential, shared with the extension; headless
 # runs it in the page and will not start without it.
 cp "$SCRIPT_DIR/extension/credentials.js" "$INSTALL_DIR/mcp-server/"

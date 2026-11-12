@@ -661,6 +661,18 @@ agent.fill_form({
 | `browser_stop_observing` | Stop observing and get accumulated changes |
 | `browser_scroll_and_capture` | Scroll through page capturing element info |
 
+#### Accessibility Snapshot & Ref Actions
+| Tool | Description |
+|------|-------------|
+| `browser_snapshot` | Compact accessibility tree of the page: roles, accessible names, states and values, with a stable `ref_N` on every element it prints. `interactive_only` gives a flat list of what can be acted on, `max_chars` bounds the output, `selector` scopes it |
+| `browser_find` | Search that tree by `text` and/or `role` and get matching refs, each with the heading it sits under |
+| `browser_click_ref` | Click a ref (left/right, `double_click`) |
+| `browser_type_ref` | Fill a textbox/textarea/contenteditable by ref (`clear`, `submit`) |
+| `browser_select_ref` | Choose an option of a native `<select>` by ref, by `value`, `text` or `index` (`values` for a multiple select) |
+| `browser_hover_ref` | Hover a ref |
+
+See [Accessibility snapshot and refs](#accessibility-snapshot-and-refs).
+
 #### Console & Network Logging
 | Tool | Description |
 |------|-------------|
@@ -1061,7 +1073,7 @@ points.
 ```bash
 mise run test            # everything
 mise run test-python     # MCP server, safety guard, headless backend, native host, stdio wrapper, agent, identity
-mise run test-extension  # content script, background script, approval page
+mise run test-extension  # content script, background script, approval page, accessibility snapshot script
 ```
 
 What the suites cover, beyond the obvious:
@@ -1124,6 +1136,50 @@ form inputs, empty links/buttons, meta description and viewport info, page
 dimensions — plus a screenshot. Point Claude at a page and ask for a critique;
 this tool is the evidence-gathering step.
 
+## Accessibility snapshot and refs
+
+`browser_snapshot` is the cheap way to look at a page and act on it without
+writing selectors:
+
+```
+- main [ref_1]
+  - heading "Shop" [ref_2] [level=1]
+  - text "Welcome back"
+  - link "Cart (2)" [ref_3] [href="/cart"]
+  - form "Login" [ref_4]
+    - textbox "Email" [ref_5] [type=email]
+    - checkbox "Remember me" [ref_6] [checked]
+    - button "Sign in" [ref_7]
+```
+
+Then `browser_type_ref {ref: "ref_5", text: "me@example.com"}`,
+`browser_click_ref {ref: "ref_7"}`, and so on. Notes:
+
+- **Refs are stable per element.** The same element keeps its ref across
+  snapshots, and a number is never reused. They live in the page, so a
+  navigation or reload wipes them: a ref from before that is rejected as
+  `unknown_ref`. A ref whose element has left the page (a re-render) is
+  `stale_ref`. Both errors say to take a new snapshot.
+- **`browser_find`** returns refs for elements matching `text` (substring of
+  the name, value or link target, or the whole name with `exact`) and/or
+  `role`; to read prose use `browser_get_text`.
+- **Coverage.** Same-origin iframes and open shadow DOM are entered; a
+  cross-origin frame is listed as unreadable. Hidden (`display: none`,
+  `aria-hidden`, `visibility: hidden`) elements are left out.
+- **Credentials.** Fields `extension/credentials.js` calls credentials print
+  as `value="***"` (or no value if empty); typing into one is refused unless
+  `allow_password_typing` is set, and what a credential field holds is never
+  echoed back. Credential text nested elsewhere in the page is scrubbed from
+  the snapshot.
+- **No extension change.** The six tools run a fixed script
+  (`mcp-server/ax_page.js`, with `credentials.js` spliced in) through the
+  existing `executeScript` action, the way `browser_audit_page` does. They
+  therefore need the script toggle on, are refused on protected URLs, and the
+  four actions are refused in read-only mode; `browser_safety_status` lists
+  them under `script_tools`. Typed text is masked in the audit log.
+- **Not covered:** custom (non-native) dropdowns - click them open, snapshot
+  again, click the option - and elements inside cross-origin iframes.
+
 ## Safety Guards
 
 Every tool call passes through a safety guard before it reaches the browser.
@@ -1155,14 +1211,14 @@ the `browser_safety_status` tool.
 | **Password fields (writing)** | Typing into a credential field is refused by default in both attended and headless modes, from one definition the two share and a test pins. A "credential field" is any of: an element with `type="password"`, including a custom element such as `<sl-input type="password">`, which is what component libraries ship and therefore what an agent has to target; an element whose `autocomplete` holds `current-password`, `new-password`, `one-time-code`, `cc-number`, `cc-csc`, `cc-exp`, `cc-exp-month` or `cc-exp-year`; or an element that holds an entered value — `<input>`, `<textarea>`, `<select>`, a `contenteditable`, a custom element — whose `name` or `id` looks like a credential (`passwd`, `cvv`, `otpCode`, `user[password]`, `apiKey`, `mfaCode`, `verificationCode`, `securityCode`, `cc_number`, `creditCard`, `pincode`, `cookie`, `recoveryCodes`, `backup_codes`, `cardCode`). `browser_type`, `browser_set_value` and, in headless mode, `browser_press_key` (whose keys really type there) are covered. Credentials belong in the browser's own password manager. Set `"allow_password_typing": true` to override; an `allow_password` argument sent by the agent, in any spelling, is dropped, so only `safety.json` can open the guard. |
 | **Credential fields (reading)** | Reading one back is guarded too: `browser_get_value` returns `***` with `masked: true` when the field is filled and `null` when it is empty, in both modes, and `browser_get_elements` / `browser_get_page_info` mask the value in element metadata. In the Firefox extension one function decides this for `browser_get_value`, `browser_get_elements`, `browser_get_page_info`, `browser_get_tab_info`, `browser_get_text`, `browser_scroll_and_capture` and `browser_observe_element` — the last two were *not* covered until a data-flow review found them, which is why this sentence names the set instead of asserting completeness. The fields masked are the credential fields defined in the row above, plus `type=hidden` inputs, which carry CSRF and session tokens; a `***` can therefore come from an ordinary text input. `browser_get_text` on a credential field returns `***`, and a whole-page `browser_get_text` masks the text of any credential `<textarea>` or `contenteditable` inside it, reporting `maskedFields`. `allow_password_typing` lifts the mask for `browser_get_value`, `browser_get_elements` and `browser_get_page_info` only; the other readers mask whatever it says. `browser_execute_script` can still read any field — see below. Nor does the mask apply to `browser_screenshot`: a revealed password (a "show password" toggle makes the field `type=text`), an on-screen one-time code or a visible account number is captured as pixels and kept under the retention policy. |
 | **Human approval** | The Approve/Deny decision is taken in an **extension window** (`moz-extension://`), which the page being automated cannot read, restyle or click. Only trusted events count, and only the extension's own pages may answer — a content script's attempt is refused. Closing the window is a denial. If no window can be opened the in-page banner is used as a fallback, rendered in a closed shadow root, and the result is marked `degraded: true` because a prompt sharing the DOM with the page is not equivalent. If the prompt cannot be completed, the action is **refused** rather than falling back to a token the agent could satisfy itself. Firefox does not support buttons on notifications, so the notification remains an attention-getter. |
-| **Scripts on protected sites** | The script tools — `browser_execute_script`, `browser_eval_chain`, `browser_wait_and_act`, `browser_inject_observer`, and `browser_audit_page`, which runs a fixed inspection script — are **refused outright** on a protected URL, not merely confirmed: a script can read any field on the page, so the credential guard does not constrain it, and a confirmation the agent can satisfy is no control over arbitrary JavaScript. Turn it off with `"deny_scripts_on_protected_urls": false`. |
+| **Scripts on protected sites** | The script tools — `browser_execute_script`, `browser_eval_chain`, `browser_wait_and_act`, `browser_inject_observer`, and the tools that run a fixed script of ours (`browser_audit_page`, `browser_snapshot`, `browser_find` and the four `*_ref` actions) — are **refused outright** on a protected URL, not merely confirmed: a script can read any field on the page, so the credential guard does not constrain it, and a confirmation the agent can satisfy is no control over arbitrary JavaScript. Turn it off with `"deny_scripts_on_protected_urls": false`. |
 | **Unlisted domains** | `protected_url_patterns` is a denylist of ~16 finance, health and government patterns, so everything else — your mail, your cloud console, your admin panels — is unprotected by default. Set `"unlisted_domains": "confirm"` to invert that, and list your normal work in `trusted_url_patterns`. Expect a lot of prompts until that list is right; prompt fatigue is its own hazard, which is why it is opt-in. |
 | **Confirmation tokens** | A `confirm_token` is bound to a hash of the exact call — tool, arguments and URL — so one earned on a harmless call cannot be spent on a dangerous one. Single-use, 120s. |
 | **Blocklist scope** | `blocked_url_patterns` / `allowed_url_patterns` apply to the page a tool acts on, not only to a navigation argument, so blocking a domain also refuses reads on an already-open tab there. |
 | **Low-risk acts** | `browser_scroll`, `browser_scroll_and_capture`, `browser_hover`, `browser_highlight` and `browser_focus_tab` change state, so read-only mode blocks them, but they do not raise a protected-site prompt — prompting on every scroll teaches people to click Approve without reading. `browser_screenshot_all_tabs` is **not** observation: it activates and photographs every tab in every window. |
 | **Human approval (Duo-style)** | With `protected_approval` set to `"auto"` (default) or `"human"`, a protected action triggers an OS notification plus the Approve/Deny window described above. The action proceeds only if the person clicks **Approve** (60s timeout = deny). `"token"` forces the agent-side flow; headless mode always uses tokens since no human is present. |
 | **Read-only mode** | Set `"read_only": true` or `CLAUDE_BROWSERX_READ_ONLY=1` to block every state-changing tool while keeping screenshots, page inspection, and log reading available. Useful for "look but don't touch" sessions. |
-| **Script toggle** | Set `"allow_script_execution": false` or `CLAUDE_BROWSERX_ALLOW_SCRIPTS=0` to disable `browser_execute_script`, `browser_eval_chain`, `browser_wait_and_act`, `browser_inject_observer` and `browser_audit_page` entirely. `browser_audit_page` only observes, but it does so by running a fixed script in the page, so the toggle covers it; `browser_safety_status` lists every tool it covers as `script_tools`. |
+| **Script toggle** | Set `"allow_script_execution": false` or `CLAUDE_BROWSERX_ALLOW_SCRIPTS=0` to disable `browser_execute_script`, `browser_eval_chain`, `browser_wait_and_act`, `browser_inject_observer` and `browser_audit_page` entirely, and with them `browser_snapshot`, `browser_find` and the `*_ref` actions. `browser_audit_page` only observes, but it does so by running a fixed script in the page, so the toggle covers it; `browser_safety_status` lists every tool it covers as `script_tools`. |
 | **Rate limiting** | A sliding-window cap (`max_actions_per_minute`, default 120) prevents runaway automation loops. |
 | **Audit log** | Every decision (allowed, denied, confirmation requested) is appended to `~/.claudecodebrowserx/logs/audit.jsonl` with sensitive argument values (typed text, scripts, passwords, pressed keys, URL patterns) redacted at any depth and URLs reduced to scheme, host and path. Nothing is written while `"enabled": false`. |
 

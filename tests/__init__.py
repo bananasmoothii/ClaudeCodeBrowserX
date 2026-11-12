@@ -37,6 +37,10 @@ from pathlib import Path
 
 TEST_HOME = tempfile.mkdtemp(prefix='ccb-test-home-')
 os.environ['HOME'] = TEST_HOME
+# Path.home() reads USERPROFILE, not HOME, on Windows, so without this the
+# suite used the real ~/.claudecodebrowserx there: it read the person's
+# safety.json and wrote its test calls into their audit log.
+os.environ['USERPROFILE'] = TEST_HOME
 # Both prefixes: the pre-rename CLAUDE_BROWSER_* names are still honoured.
 for _name in [name for name in os.environ
               if name.startswith(('CLAUDE_BROWSERX_', 'CLAUDE_BROWSER' + '_'))]:

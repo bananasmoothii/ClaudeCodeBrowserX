@@ -10,6 +10,28 @@ are his releases. 1.5.0 onwards are from the fork at
 <https://github.com/acornelissen/ClaudeCodeBrowserX>, renamed
 ClaudeCodeBrowserX in 2.0.0.
 
+## [Unreleased]
+
+### Added
+- **Accessibility snapshot and ref tools**, for working on a page without
+  writing selectors: `browser_snapshot` (compact tree of roles, names, states
+  and values, a stable `ref_N` on each element; `interactive_only`,
+  `max_chars`, `selector`), `browser_find` (search it by text or role), and
+  `browser_click_ref`, `browser_type_ref`, `browser_select_ref`,
+  `browser_hover_ref`. A stale or unknown ref says to take a new snapshot.
+  They run a fixed script through the existing `executeScript` action
+  (`mcp-server/ax.py`, `mcp-server/ax_page.js`), so the signed extension is
+  unchanged. Guarded as script tools: refused with `allow_script_execution`
+  off and on protected URLs, the actions refused in read-only mode; credential
+  fields use `extension/credentials.js` and are never printed or typed into
+  (unless `allow_password_typing`). The installers copy the two new files.
+
+### Fixed
+- The Python tests used the real `~/.claudecodebrowserx` on Windows
+  (`Path.home()` reads `USERPROFILE`, which the test setup did not redirect),
+  reading the person's `safety.json` and writing test calls into their audit
+  log.
+
 ## [2.0.0]
 
 ### Changed

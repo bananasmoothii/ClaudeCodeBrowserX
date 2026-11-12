@@ -348,6 +348,7 @@ OBSERVE_TOOLS = {
     'browser_get_console_logs', 'browser_get_network_logs',
     'browser_clear_logs', 'browser_safety_status',
     'browser_request_approval', 'browser_audit_page', 'browser_solve_captcha',
+    'browser_snapshot', 'browser_find',
 }
 
 # browser_screenshot_all_tabs is deliberately NOT an observe tool: it activates
@@ -362,7 +363,7 @@ OBSERVE_TOOLS = {
 # click Approve without reading, which costs more than it buys.
 LOW_RISK_ACT_TOOLS = {
     'browser_scroll', 'browser_hover', 'browser_highlight', 'browser_focus_tab',
-    'browser_scroll_and_capture',
+    'browser_scroll_and_capture', 'browser_hover_ref',
 }
 
 # Tools that run arbitrary JavaScript in the page. Subject to the
@@ -382,6 +383,20 @@ SCRIPT_TOOLS = {
 # got it anyway, on a protected site, in read-only mode.
 OBSERVE_SCRIPT_TOOLS = {
     'browser_audit_page',
+    # ax.py: the accessibility snapshot, and the search over it.
+    'browser_snapshot', 'browser_find',
+}
+
+# Tools that change the page by acting on an element ref, by running a fixed
+# script of ours (ax.py / ax_page.js). They are ACT tools in every respect -
+# read-only mode refuses them and a protected site asks for confirmation (a
+# hover is low-risk, as browser_hover is) - and, being JavaScript in the page,
+# they also answer to the script toggle and the protected-site script refusal.
+# So on a protected URL they are refused outright rather than confirmed, the
+# same as browser_execute_script.
+FIXED_SCRIPT_ACT_TOOLS = {
+    'browser_click_ref', 'browser_hover_ref', 'browser_type_ref',
+    'browser_select_ref',
 }
 
 # Everything else (click, type, navigate, tab management, refresh, ...) is a
@@ -924,7 +939,8 @@ class SafetyGuard:
             # only observes: browser_audit_page runs a fixed script of ours,
             # which is still JavaScript in the page. How far the toggle
             # reaches is what a person inspects this tool to find out.
-            'script_tools': sorted(SCRIPT_TOOLS | OBSERVE_SCRIPT_TOOLS),
+            'script_tools': sorted(SCRIPT_TOOLS | OBSERVE_SCRIPT_TOOLS
+                                   | FIXED_SCRIPT_ACT_TOOLS),
             'max_actions_per_minute': self.config.get('max_actions_per_minute', 120),
             'actions_in_last_minute': recent,
             'pending_confirmations': pending,
@@ -952,7 +968,7 @@ class SafetyGuard:
                      arguments: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         arguments = arguments if arguments is not None else {}
         is_observe = tool_name in OBSERVE_TOOLS
-        is_script = tool_name in SCRIPT_TOOLS
+        is_script = tool_name in SCRIPT_TOOLS or tool_name in FIXED_SCRIPT_ACT_TOOLS
 
         # 1. Rate limit applies to everything, including observation.
         if not self._within_rate_limit():
@@ -1043,6 +1059,22 @@ class SafetyGuard:
                 }
 
         return None
+
+    def recheck_script_after_url(self, tool_name: str) -> Optional[Dict[str, Any]]:
+        """Judge a script tool against the page it actually ran on.
+
+        The guard only knows the URL of the last result it saw, so the first
+        script tool of a session (or the first after the person navigated by
+        hand) is judged against no page at all. A tool whose result carries
+        the page URL calls note_url() with it and then asks this, so a
+        snapshot of a protected site is withheld instead of returned. Nothing
+        is audited or counted here: the original check already was.
+        """
+        with self._lock:
+            enabled = self.config.get('enabled', True)
+        if not enabled:
+            return None
+        return self._script_denial(tool_name, None)
 
     def _script_denial(self, tool_name: str,
                        target_url: Optional[str]) -> Optional[Dict[str, Any]]:

@@ -115,6 +115,7 @@ HEADLESS_STARTUP_TIMEOUT = float(env('HEADLESS_STARTUP_TIMEOUT', '45'))
 from safety import (get_safety_guard, prune_screenshots,
                     screenshot_filename,
                     redact_arguments, resolve_screenshots_dir)
+import ax  # accessibility snapshot and ref-based actions
 
 # API token for localhost HTTP authentication
 _TOKEN_FILE = Path.home() / '.claudecodebrowserx' / 'api_token'
@@ -1008,6 +1009,133 @@ MCP_TOOLS: List[MCPTool] = [
             }
         }
     ),
+    # Accessibility snapshot and ref-based actions (ax.py / ax_page.js)
+    MCPTool(
+        name="browser_snapshot",
+        description=(
+            "Snapshot the page as a compact accessibility tree: one line per element with its "
+            "role, accessible name, states and value, plus a stable ref (ref_12) on every element "
+            "that has a node. Use the refs with browser_click_ref, browser_type_ref, "
+            "browser_select_ref and browser_hover_ref instead of guessing selectors. The same "
+            "element keeps its ref across snapshots; after a navigation, refs from the old page "
+            "are rejected and you take a new snapshot. Credential fields are printed without "
+            "their value. Same-origin iframes and open shadow DOM are included. Prefer "
+            "interactive_only for a short list of what can be acted on, selector to scope a big "
+            "page, and browser_find to look for one thing. It runs a fixed read-only script in "
+            "the page, so it is refused when allow_script_execution is false and on a protected "
+            "URL while deny_scripts_on_protected_urls is on; browser_safety_status lists the "
+            "tools those settings cover."),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "interactive_only": {"type": "boolean", "description": "List only elements you can act on (links, buttons, fields, ...) as a flat list.", "default": False},
+                "max_chars": {"type": "integer", "description": "Cut the snapshot at this many characters (500-200000). The result says when it was cut.", "default": 20000},
+                "selector": {"type": "string", "description": "Optional CSS selector: snapshot only this subtree."},
+                "tab_id": {"type": "integer", "description": "Optional tab ID."}
+            }
+        }
+    ),
+    MCPTool(
+        name="browser_find",
+        description=(
+            "Search the page's accessibility tree by text and/or role and return the matching refs "
+            "(ref, role, name, states, and the heading each sits under). text is a case-insensitive "
+            "substring of the name, value or link target (exact: true compares the whole name); role "
+            "is an ARIA role such as button, link, textbox, checkbox, heading. Matches are elements; "
+            "to read prose use browser_get_text. Refs are the same ones browser_snapshot prints. "
+            "Same safety rules as browser_snapshot."),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text to look for in the element's name, value or link target."},
+                "role": {"type": "string", "description": "ARIA role to match, e.g. button, link, textbox, checkbox, heading."},
+                "exact": {"type": "boolean", "description": "Require the whole name to equal text.", "default": False},
+                "interactive_only": {"type": "boolean", "description": "Only elements you can act on.", "default": False},
+                "limit": {"type": "integer", "description": "Max matches (1-100).", "default": 20},
+                "selector": {"type": "string", "description": "Optional CSS selector: search only this subtree."},
+                "tab_id": {"type": "integer", "description": "Optional tab ID."}
+            }
+        }
+    ),
+    MCPTool(
+        name="browser_click_ref",
+        description=(
+            "Click the element a ref names (from browser_snapshot or browser_find). It is scrolled "
+            "into view and sent pointer and mouse events and one click. A stale or unknown ref "
+            "returns an error telling you to take a new snapshot. The result says if the page "
+            "cancelled the click, if the element is disabled, and if something covers it. After a "
+            "click that navigates or re-renders, take a new snapshot before the next ref. Runs a "
+            "fixed script in the page: refused when allow_script_execution is false, in read-only "
+            "mode, and on a protected URL."),
+        input_schema={
+            "type": "object",
+            "required": ["ref"],
+            "properties": {
+                "ref": {"type": "string", "description": "A ref such as ref_12."},
+                "button": {"type": "string", "enum": ["left", "right"], "default": "left"},
+                "double_click": {"type": "boolean", "default": False},
+                "tab_id": {"type": "integer", "description": "Optional tab ID."}
+            }
+        }
+    ),
+    MCPTool(
+        name="browser_type_ref",
+        description=(
+            "Put text into the field a ref names: a textbox, searchbox, textarea or contenteditable. "
+            "By default it replaces what is there (clear: false appends) and fires input and change "
+            "events the way a framework expects; submit: true then presses Enter. Password and other "
+            "credential fields are refused unless allow_password_typing is set in safety.json, and "
+            "their value is never echoed. A stale or unknown ref returns an error telling you to "
+            "take a new snapshot. Same safety rules as browser_click_ref."),
+        input_schema={
+            "type": "object",
+            "required": ["ref", "text"],
+            "properties": {
+                "ref": {"type": "string", "description": "A ref such as ref_12."},
+                "text": {"type": "string", "description": "Text to enter. An empty string clears the field."},
+                "clear": {"type": "boolean", "description": "Replace the existing content (false appends).", "default": True},
+                "submit": {"type": "boolean", "description": "Press Enter afterwards (submits the form).", "default": False},
+                "tab_id": {"type": "integer", "description": "Optional tab ID."}
+            }
+        }
+    ),
+    MCPTool(
+        name="browser_select_ref",
+        description=(
+            "Choose an option in the native <select> a ref names, by value, visible text or index "
+            "(values: a list, for a multiple select). An option that does not exist returns the "
+            "list of options. For a custom dropdown, click it open with browser_click_ref, take a "
+            "new snapshot and click the option. Same safety rules as browser_click_ref."),
+        input_schema={
+            "type": "object",
+            "required": ["ref"],
+            "properties": {
+                "ref": {"type": "string", "description": "A ref such as ref_12."},
+                "value": {"type": "string", "description": "Option value."},
+                "text": {"type": "string", "description": "Option text, as displayed."},
+                "index": {"type": "integer", "description": "Option position, from 0."},
+                "values": {"type": "array", "items": {"type": "string"}, "description": "Several option values or texts, for a multiple select."},
+                "tab_id": {"type": "integer", "description": "Optional tab ID."}
+            }
+        }
+    ),
+    MCPTool(
+        name="browser_hover_ref",
+        description=(
+            "Move the pointer over the element a ref names (scrolled into view; pointer and mouse "
+            "enter/over/move events, also sent to its ancestors the way a real pointer would). Use "
+            "it to open hover menus and tooltips, then take a new snapshot. Same safety rules as "
+            "browser_click_ref, except that hovering is not confirmed on a protected site because "
+            "scripts there are refused outright."),
+        input_schema={
+            "type": "object",
+            "required": ["ref"],
+            "properties": {
+                "ref": {"type": "string", "description": "A ref such as ref_12."},
+                "tab_id": {"type": "integer", "description": "Optional tab ID."}
+            }
+        }
+    ),
     # Safety
     MCPTool(
         name="browser_safety_status",
@@ -1406,6 +1534,8 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
             return self._run_workflow(arguments)
         if tool_name == 'browser_audit_page':
             return self._audit_page(arguments)
+        if tool_name in ax.AX_TOOLS:
+            return self._ax_tool(tool_name, arguments)
 
         # Map tool names to actions
         tool_action_map = {
@@ -1844,6 +1974,46 @@ class MCPHTTPHandler(BaseHTTPRequestHandler):
             response['screenshot'] = shot.get('filepath') if shot.get('success') else None
 
         return response
+
+    def _ax_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """browser_snapshot, browser_find and the four ref actions.
+
+        Like _audit_page, this sends a fixed script of ours through the
+        executeScript action directly, so no executeScript call reaches the
+        guard: the guard judged these tools by name already (OBSERVE_SCRIPT_TOOLS
+        and FIXED_SCRIPT_ACT_TOOLS in safety.py), before execute_tool got here.
+        The credential flag comes from the safety config only; the agent's own
+        spelling of it was dropped at the top of execute_tool.
+        """
+        guard = get_safety_guard()
+        try:
+            command, args = ax.prepare(tool_name, arguments)
+            script = ax.build_script(
+                command, args,
+                allow_password=bool(guard.config.get('allow_password_typing', False)))
+        except ValueError as e:
+            return {'success': False, 'error': str(e)}
+        except (RuntimeError, OSError) as e:
+            logger.error(f"{tool_name}: could not build the page script: {e}")
+            return {'success': False, 'error': f'{tool_name} unavailable: {e}'}
+
+        raw = self._dispatch_action('executeScript', arguments.get('tab_id'),
+                                    {'script': script})
+        if not raw.get('success'):
+            return {'success': False,
+                    'error': f"{tool_name} failed: {raw.get('error', 'unknown')}"}
+
+        result = ax.interpret(raw.get('result'))
+
+        # The result names the page it came from; tell the guard, so the next
+        # call is judged against it. Then judge this one against it too: the
+        # first script tool of a session ran before the guard knew the URL.
+        guard.note_url(result)
+        if tool_name in ax.OBSERVE_AX_TOOLS and result.get('success'):
+            denial = guard.recheck_script_after_url(tool_name)
+            if denial is not None:
+                return denial
+        return result
 
     def _save_screenshot(self, result: Dict[str, Any], arguments: Dict[str, Any]) -> Dict[str, Any]:
         """Save screenshot data to file."""

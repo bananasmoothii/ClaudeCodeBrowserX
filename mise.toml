@@ -14,6 +14,7 @@ run = [
   "node tests/content_script.test.mjs",
   "node tests/background_script.test.mjs",
   "node tests/approve.test.mjs",
+  "node tests/ax_page.test.mjs",
 ]
 
 [tasks.test-python]
@@ -31,6 +32,7 @@ run = [
   "node tests/content_script.test.mjs",
   "node tests/background_script.test.mjs",
   "node tests/approve.test.mjs",
+  "node tests/ax_page.test.mjs",
 ]
 
 [tasks.package]

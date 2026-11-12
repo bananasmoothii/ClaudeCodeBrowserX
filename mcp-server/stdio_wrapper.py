@@ -218,7 +218,9 @@ PAGE_CONTENT_TOOLS = {
     'browser_find_tabs', 'browser_audit_page', 'browser_execute_script',
     'browser_eval_chain', 'browser_scroll_and_capture', 'browser_observe_element',
     'browser_stop_observing', 'browser_wait_for_element', 'browser_click',
-    'browser_inject_observer',
+    'browser_inject_observer', 'browser_snapshot', 'browser_find',
+    'browser_click_ref', 'browser_type_ref', 'browser_select_ref',
+    'browser_hover_ref',
 }
 
 _UNTRUSTED_PREAMBLE = (
