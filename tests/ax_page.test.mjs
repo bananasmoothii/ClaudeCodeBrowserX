@@ -403,6 +403,54 @@ test('with allow_password_typing the write happens but the value is not echoed',
   assert.equal(doc.all().find(e => e.type === 'password').value, 'newsecret');
 });
 
+// ---- roving tabindex
+
+const fileGrid = (d, body) => {
+  body.add(el(d, 'main', {}, el(d, 'div', { role: 'grid', 'aria-label': 'Files' },
+    el(d, 'div', { role: 'gridcell', tabindex: '0', 'aria-label': 'Colab Notebooks Folder' }, 'Colab Notebooks'),
+    el(d, 'div', { role: 'gridcell', tabindex: '-1', 'aria-label': 'Ensimag Folder' }, 'Ensimag'),
+    el(d, 'div', { role: 'gridcell', tabindex: '-1', 'aria-label': 'PFE Folder' }, 'PFE'),
+    el(d, 'div', { role: 'gridcell', 'aria-label': 'Read-only total' }, 'Total 3')),
+    el(d, 'div', { tabindex: '-1' }, el(d, 'button', {}, 'Inside the focus wrapper'))));
+};
+
+test('every item of a roving-tabindex grid gets a ref, not only the one at tabindex 0', () => {
+  // Google Drive's file grid: one cell has tabindex="0", the rest "-1". Only
+  // the first used to be found, so browser_find could not see the folders.
+  const { call } = session(fileGrid);
+  const snap = call('snapshot', {}).snapshot;
+  assert.match(snap, /gridcell "Colab Notebooks Folder" \[ref_\d+\]/);
+  assert.match(snap, /gridcell "Ensimag Folder" \[ref_\d+\]/);
+  assert.match(snap, /gridcell "PFE Folder" \[ref_\d+\]/);
+  const found = call('find', { text: 'Ensimag' });
+  assert.equal(found.matches.length, 1);
+  assert.equal(found.matches[0].role, 'gridcell');
+});
+
+test('a grid cell with no tabindex is still just content', () => {
+  const { call } = session(fileGrid);
+  const snap = call('snapshot', {}).snapshot;
+  assert.ok(!/gridcell "Read-only total"/.test(snap), snap);
+  assert.match(snap, /Total 3/);
+});
+
+test('a tabindex -1 focus wrapper does not swallow what is inside it', () => {
+  const { call } = session(fileGrid);
+  const snap = call('snapshot', {}).snapshot;
+  assert.match(snap, /button "Inside the focus wrapper"/);
+  assert.ok(!/clickable/.test(snap), snap);
+});
+
+test('a roving item can be acted on by its ref', () => {
+  const { call, doc } = session(fileGrid);
+  const found = call('find', { text: 'PFE' });
+  const cell = doc.all().find(e => e.getAttribute && e.getAttribute('aria-label') === 'PFE Folder');
+  let clicks = 0;
+  cell.addEventListener('click', () => { clicks += 1; });
+  assert.equal(call('click', { ref: found.matches[0].ref }).ok, true);
+  assert.equal(clicks, 1);
+});
+
 // ---- refs
 
 test('an element keeps its ref across snapshots', () => {
@@ -422,6 +470,27 @@ test('a ref whose element left the page is stale and says to re-snapshot', () =>
   assert.equal(r.ok, false);
   assert.equal(r.code, 'stale_ref');
   assert.match(r.error, /browser_snapshot/);
+});
+
+test('a ref whose node now holds different content is stale and nothing is done', () => {
+  // Google Drive recycles menu nodes: the node that was "Organiser" can be
+  // "Partager" at the next look. A click by ref must not land on it.
+  const { call, doc } = session(shop);
+  call('snapshot', {});
+  const btn = doc.all().find(e => e.tagName === 'BUTTON');
+  let clicks = 0;
+  btn.addEventListener('click', () => { clicks += 1; });
+  btn.textContent = 'Delete account';
+  const r = call('click', { ref: 'ref_7' });
+  assert.equal(r.ok, false);
+  assert.equal(r.code, 'stale_ref');
+  assert.match(r.error, /"Sign in"/);
+  assert.match(r.error, /"Delete account"/);
+  assert.match(r.error, /Nothing was done/);
+  assert.equal(clicks, 0);
+  // A fresh snapshot issues the same node a ref that works again.
+  call('snapshot', {});
+  assert.equal(call('click', { ref: 'ref_7' }).ok, true);
 });
 
 test('a ref from before a navigation is unknown and says to re-snapshot', () => {

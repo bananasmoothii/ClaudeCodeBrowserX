@@ -41,8 +41,12 @@
     // Strong references on purpose. A WeakRef to an Xray wrapper can be
     // collected while the page node is alive, which would call a live element
     // stale. Entries for detached nodes are pruned at the next snapshot.
-    STATE = G.__ccbAx = { version: 1, next: 1, ids: new WeakMap(), refs: new Map() };
+    STATE = G.__ccbAx = { version: 1, next: 1, ids: new WeakMap(), refs: new Map(),
+                          seen: new Map() };
   }
+  // What each ref was called when a snapshot issued it. A state made before
+  // this field existed gets an empty one.
+  if (!STATE.seen) STATE.seen = new Map();
 
   var MAX_VISITED = 40000;     // elements looked at in one walk
   var MAX_REFS = 20000;        // refs kept; the oldest go first
@@ -63,6 +67,16 @@
     checkbox: 1, radio: 1, 'switch': 1, combobox: 1, listbox: 1, option: 1,
     menuitem: 1, menuitemcheckbox: 1, menuitemradio: 1, tab: 1, slider: 1,
     spinbutton: 1, treeitem: 1, clickable: 1 };
+
+  // Items of a composite widget (a grid, a list of files). Such widgets use a
+  // roving tabindex: one item has tabindex="0" and every other has "-1", so
+  // "focusable by Tab" picked out the first cell of Google Drive's file grid
+  // and left the other 49 with no ref at all. For these roles any tabindex,
+  // -1 included, says the page treats the element as something to act on.
+  // Not for every element: a tabindex="-1" wrapper used for focus management
+  // would become a "clickable" leaf and hide everything inside it.
+  var ROVING_ROLES = { gridcell: 1, row: 1, cell: 1, columnheader: 1,
+    rowheader: 1, listitem: 1 };
 
   // Containers that are always printed, because they say where you are.
   var ALWAYS_NODE = { navigation: 1, main: 1, banner: 1, contentinfo: 1,
@@ -216,6 +230,8 @@
   function isInteractive(el, role) {
     if (role && INTERACTIVE_ROLES[role]) return true;
     var ti = attr(el, 'tabindex');
+    if (role && ROVING_ROLES[role] && ti !== null && ti.trim() !== '' &&
+        Number.isFinite(Number(ti))) return true;
     if (ti !== null && ti !== '' && Number(ti) >= 0 && tagOf(el) !== 'BODY') return true;
     if (el.hasAttribute && el.hasAttribute('onclick')) return true;
     return false;
@@ -376,12 +392,12 @@
     STATE.refs.forEach(function (el, key) {
       var gone = false;
       try { gone = !el.isConnected; } catch (e) { gone = true; }
-      if (gone) STATE.refs.delete(key);
+      if (gone) { STATE.refs.delete(key); STATE.seen.delete(key); }
     });
     if (STATE.refs.size > MAX_REFS) {
       var drop = STATE.refs.size - MAX_REFS;
       STATE.refs.forEach(function (el, key) {
-        if (drop-- > 0) STATE.refs.delete(key);
+        if (drop-- > 0) { STATE.refs.delete(key); STATE.seen.delete(key); }
       });
     }
   }
@@ -422,6 +438,7 @@
     function emit(el, role, depth, interactive) {
       var name = nameOf(el, role);
       var num = refFor(el);
+      STATE.seen.set('ref_' + num, { role: role, name: isCredential(el) ? '' : name });
       var flags = flagsOf(el, role);
       var value = valueOf(el, role);
       var line = '- ' + role + (name ? ' ' + JSON.stringify(name) : '') +
@@ -681,6 +698,22 @@
       return { error: fail('stale_ref', key + ' is stale: its element has been removed from the ' +
         'page (it re-rendered or was replaced). Take a new snapshot with browser_snapshot ' +
         'and use the fresh ref.') };
+    }
+    // The element is still in the page, but a page that recycles its nodes
+    // (Google Drive's context menus do) can give the same node new content:
+    // ref_77 was "Organiser" in one snapshot and "Partager" in the next, and a
+    // click by ref would have acted on whatever the node held by then.
+    var then = STATE.seen.get(key);
+    if (then && then.name) {
+      var role = roleOf(el) || (isInteractive(el, null) ? 'clickable' : tagOf(el).toLowerCase());
+      var now = isCredential(el) ? '' : nameOf(el, role);
+      if (now !== then.name) {
+        return { error: fail('stale_ref', key + ' is stale: it was ' + then.role + ' ' +
+          JSON.stringify(then.name) + ' when the snapshot was taken and the page has since ' +
+          'put ' + (now ? JSON.stringify(now) : 'something else') + ' in that element. ' +
+          'Nothing was done. Take a new snapshot with browser_snapshot (or use browser_find) ' +
+          'and use the fresh ref.') };
+      }
     }
     return { el: el, key: key };
   }
